@@ -121,27 +121,22 @@ Forks must use their own network ID and keys. Changing only the TLD is insuffici
 Implemented and tested:
 
 - strict config parsing;
-- proxy/static routing;
+- versioned network profile (`pkg/profile`);
+- proxy/static routing and SSRF-guarded HTTPS target dispatch;
 - local CA and leaf certificates;
-- DNS packet responses;
-- ownership/target signatures and rollback checks;
+- DNS packet responses and optional foreground UDP DNS stub;
+- `networkId`-bound ownership/target signatures and rollback checks;
+- content-addressed IPFS manifest resolver (`pkg/resolver`) and monotonic cache;
+- foreground local run (`alt run`) and `register.alt` demo bootstrap (`examples/demo-bootstrap`);
 - bounded WebRTC DataChannel adapter;
 - configurable namespace primitives.
-
-In progress:
-
-- foreground local run;
-- versioned network profile;
-- IPFS record source;
-- `register.alt` bootstrap fixture;
-- resolver integration.
 
 Planned:
 
 - production installer/daemon;
 - public registry and identity;
 - IPNS replication;
-- secure public HTTPS proxy;
+- redirect revalidation and multi-origin HTTPS policies;
 - signaling/P2P orchestration;
 - operational release and recovery systems.
 

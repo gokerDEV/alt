@@ -382,4 +382,3 @@ func acceptsHTML(acceptHeader string) bool {
 	}
 	return false
 }
-

@@ -1,6 +1,7 @@
 package dnsstub
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -154,6 +155,43 @@ func buildErrorResponse(txID, reqFlags uint16, question []byte, rcode uint8) []b
 	}
 	resp = append(resp, question...)
 	return resp
+}
+
+// ServeUDP runs a UDP DNS stub listener that processes queries via HandleQuery until ctx is cancelled
+// or an unrecoverable PacketConn read error occurs.
+func ServeUDP(ctx context.Context, conn net.PacketConn, cfg Config) error {
+	if conn == nil {
+		return errors.New("dnsstub: nil PacketConn")
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+
+	buf := make([]byte, 4096)
+	for {
+		n, addr, err := conn.ReadFrom(buf)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				continue
+			}
+			return err
+		}
+		resp, err := HandleQuery(buf[:n], cfg)
+		if err != nil || len(resp) == 0 {
+			continue
+		}
+		_, _ = conn.WriteTo(resp, addr)
+	}
 }
 
 // EncodeQuery constructs a minimal DNS query packet for testing and diagnostics (alt doctor).

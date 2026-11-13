@@ -1,20 +1,33 @@
 # ALT — An Alternative Universe for the Web (`.alt`)
 
-> **`.alt` — Local-first HTTPS development and peer-to-peer / direct-origin web publishing.**
+> **`.alt` — Local-first HTTPS development and signed private-namespace web resolution.**
 
-ALT enables developers to run local HTTPS applications under `.alt` domains (e.g., `https://goker.alt` or `https://local.alt`) with zero account requirements, and optionally publish registered `.alt` domains either directly from localhost over WebRTC DataChannels or via signed HTTPS origin records.
+ALT enables developers to run local HTTPS applications under `.alt` domains (e.g., `https://register.alt` or `https://local.alt`) with zero account requirements, and resolve signed domain ownership and target records from content-addressed IPFS manifests.
 
-The repository is designed as a reusable private-namespace engine. `.alt` is the
-default network, not a hard requirement: independent operators can configure a
-different TLD and provide their own network ID, registry authority keys, record
-root, services, and policies. Independent networks are not automatically
-globally unique or mutually trusted.
+The repository is built as a **reusable private-namespace engine**. `.alt` is the default upstream network profile, not a hardcoded requirement: independent operators can launch their own private TLD (such as `.mesh`) with a distinct `networkId`, registry authority keys, IPFS/IPNS root, reserved names, and branding. Independent networks are not automatically globally unique or mutually trusted.
 
-> **Implementation status:** this repository is an early vertical slice, not a
-> production release. Local routing, certificates, DNS packets, signed records,
-> and the DataChannel adapter are implemented. Registry hosting, IPFS/IPNS
-> orchestration, production installers, and complete P2P publishing are still in
-> progress. See [PLAN.md](PLAN.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+> **Important scope notice:** This repository delivers an honest, non-privileged vertical slice. It **does not** claim production-grade OS installation, automatic `/etc/resolver` or system keychain mutation, global availability, or immediate certificate/record revocation.
+
+---
+
+## Feature Status Matrix
+
+| Capability | Status | Package / Command | Notes |
+| --- | --- | --- | --- |
+| Namespace policy & single-label validation | **Implemented** | `pkg/names` | Single source of truth for TLD and domain checks |
+| Versioned network profile (`networkId`, keys, TLD, root) | **Implemented** | `pkg/profile` | Strict YAML AST validation; prevents cross-network replay |
+| Constrained device-local CA & SNI leaf issuance | **Implemented** | `pkg/pki` | ECDSA P-256 Root CA with `PermittedDNSDomains` limited to TLD |
+| Authoritative loopback UDP DNS stub | **Implemented** | `pkg/dnsstub`, `alt run --dns-listen` | Answers configured TLD only; returns `REFUSED` for all other names |
+| Strict `alt.yaml` v1 config & segment-aware router | **Implemented** | `pkg/config`, `pkg/router` | Loopback-only upstreams, safe static serving, symlink-escape protection |
+| Ed25519 ownership & target records (`networkId`-bound) | **Implemented** | `pkg/records` | Domain-separated signatures with `networkId` prefix + monotonic sequence |
+| Content-addressed IPFS manifest resolver & cache | **Implemented** | `pkg/resolver` | Verifies raw CIDv1 SHA-256 before JSON decode; monotonic anti-rollback |
+| Foreground local HTTPS + DNS + IPFS fallback CLI | **Demo** | `cmd/alt` (`alt run`) | Non-privileged high-port listener; graceful `SIGINT`/`SIGTERM` drain |
+| `register.alt` bootstrap generator & loopback IPFS server | **Demo** | `cmd/alt-bootstrap-gen`, `cmd/alt-demo-gateway` | Generates external `0600` dev keys and public `examples/demo-bootstrap` |
+| WebRTC DataChannel `net.Conn` / `net.Listener` transport | **Beta** | `pkg/p2p/dcnet` | 16 KiB framing, 256 KiB send ceiling, 16-channel session budget |
+| Mutable IPNS root resolution & multi-provider pinning | **Planned** | — | Current slice uses deterministic fixed manifest CIDv1 |
+| Live WebRTC signaling service & `alt publish` P2P orchestration | **Planned** | — | DataChannel transport ready; signaling rendezvous planned |
+| Privileged OS setup (`alt setup`, port 443, `/etc/resolver`) | **Planned** | — | Manual one-time trust/DNS steps documented below |
+| Hosted `register.alt` GitHub login, quotas, and account recovery | **Planned** | — | Out of scope for current slice |
 
 ---
 
@@ -22,47 +35,18 @@ globally unique or mutually trusted.
 
 ```mermaid
 flowchart TB
-    subgraph Control["Centralized Allocation Authority"]
-        REG["Register API & Web UI"]
-        AUTH["GitHub Identity & Sponsorships"]
-        SIGN["Ed25519 Allocation Signing & Publishing"]
-        AUTH --> REG --> SIGN
-    end
-    subgraph Distribution["IPFS / IPNS Network"]
-        INDEX["IPNS: Root Index Pointer"]
-        BLOCKS["IPFS: Sharded Indexes & Signed Records"]
-        INDEX --> BLOCKS
-    end
-    subgraph Visitor["Visitor Device"]
-        BROWSER["Browser: https://goker.alt"]
-        ALT["ALT Daemon: DNS Stub, CA, Router, Resolver"]
-        BROWSER <--> ALT
-    end
-    subgraph Targets["Publication Targets"]
-        HOST["Hosted HTTPS Origin (Vercel / VPS)"]
-        PUB["Publisher ALT & Localhost App"]
-        SIG["Independent WSS Signaling Service"]
-        TURN["Optional TURN Relay"]
-    end
-    SIGN --> BLOCKS
-    SIGN --> INDEX
-    ALT --> BLOCKS
-    ALT --> INDEX
-    ALT <-->|"Direct HTTPS Target"| HOST
-    ALT <-->|"Signed Control Messages"| SIG
-    PUB <-->|"Signed Control Messages"| SIG
-    ALT <-->|"Direct WebRTC (dcnet)"| PUB
-    ALT <--> TURN
-    TURN <--> PUB
+    Browser[Browser / curl] -->|HTTPS private name| Client[ALT foreground client]
+    Client --> Local{Local override?}
+    Local -->|yes| App[Loopback HTTP app]
+    Local -->|no| Resolver[Signed record resolver]
+    Resolver --> Cache[Monotonic verified cache]
+    Resolver --> IPFS[IPFS gateway / fixture source]
+    Resolver --> HTTPS[Verified public HTTPS origin]
+    Registry[Registry authority key] -->|signs alt.ownership.v1| IPFS
+    Owner[Domain owner key] -->|signs alt.target.v1| IPFS
 ```
 
-### Core Design Principles
-
-1. **Zero-Config Local HTTPS (`alt dev`):** Uses a device-scoped ECDSA P-256 Root CA constrained to `.alt` (`pkg/pki`), a local DNS stub answering only `.alt` queries (`pkg/dnsstub`), and a loopback HTTPS reverse proxy (`pkg/router`, `pkg/daemon`).
-2. **Decentralized Resolution (`pkg/records`):** Domain allocations (`alt.ownership.v1`) are signed by the Registry Authority (`Ed25519`), while target routing records (`alt.target.v1`) are signed by the domain owner's key and distributed via IPFS/IPNS with monotonic `generation` and `sequence` anti-rollback enforcement.
-3. **Direct HTTPS or P2P WebRTC Transport (`pkg/p2p/dcnet`):**
-   - **`https` mode:** Visitor connects directly to the upstream HTTPS origin with strict TLS verification while preserving the `.alt` origin in the browser.
-   - **`p2p` mode:** Visitor establishes a Pion WebRTC `PeerConnection` to the publisher via a stateless WebSocket signaling service. Each upstream HTTP/1.1 connection opens a reliable, ordered DataChannel adapted to `net.Conn` and `net.Listener`.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for trust boundaries and [PLAN.md](PLAN.md) for the delivery checklist.
 
 ---
 
@@ -71,111 +55,150 @@ flowchart TB
 ```text
 .
 ├── cmd/
-│   └── alt/                  # CLI & local daemon entry point (setup, dev, publish, config, doctor, etc.)
+│   ├── alt/                  # CLI entry point (`alt run`, `alt config validate`, etc.)
+│   ├── alt-bootstrap-gen/    # Generates non-production dev keys outside repo & signs manifest/profile
+│   └── alt-demo-gateway/     # Loopback HTTP IPFS raw-block gateway for offline/local verification
+├── examples/
+│   └── demo-bootstrap/       # Public demo profile.yaml + content-addressed manifest.json (no private keys)
 ├── pkg/
-│   ├── config/               # Strict alt.yaml v1 parser, AST checker, and semantic validator (§18)
-│   ├── daemon/               # Local override manager, monotonic record cache, and request dispatcher (§5, §8, §17)
-│   ├── dnsstub/              # Authoritative local DNS stub for .alt queries (§4.1)
-│   ├── errors/               # Canonical machine-readable ALT error codes (§13)
-│   ├── p2p/
-│   │   └── dcnet/            # Pion WebRTC DataChannel net.Conn, net.Listener, and backpressure contract (§10.3)
-│   ├── pki/                  # Device-local Root CA and on-demand SNI leaf certificate issuer (§4.2)
-│   ├── records/              # Ed25519 canonical signing and verification for ownership & target records (§7)
-│   └── router/               # Segment-aware path router, loopback reverse proxy, and safe static/SPA server (§18)
-├── go.mod
-└── README.md
+│   ├── config/               # Strict alt.yaml v1 parser, AST checker, and semantic validator
+│   ├── daemon/               # Local override precedence, SSRF-guarded HTTPS target proxy, error mapping
+│   ├── dnsstub/              # Authoritative UDP DNS stub for configured TLD queries
+│   ├── errors/               # Canonical machine-readable ALT error codes
+│   ├── names/                # Canonical TLD and domain normalization/validation
+│   ├── p2p/dcnet/            # Pion WebRTC DataChannel net.Conn, net.Listener, and backpressure contract
+│   ├── pki/                  # Device-local Root CA and on-demand SNI leaf certificate issuer
+│   ├── profile/              # Versioned network profile schema and strict YAML loader
+│   ├── records/              # Ed25519 networkId-bound canonical signing and verification
+│   ├── resolver/             # Raw CIDv1 verification, IPFS HTTP gateway source, and monotonic cache
+│   └── router/               # Segment-aware path router, loopback reverse proxy, and safe static/SPA server
+├── ARCHITECTURE.md
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── LICENSE                   # Apache-2.0 (code & docs)
+├── LICENSE-DOCS-CC-BY-4.0    # CC BY 4.0 full legalcode (dual-licensed docs)
+├── NOTICE                    # Dual-license summary, trademark & trust-root notice
+├── PLAN.md
+└── SECURITY.md
 ```
 
 ---
 
-## WebRTC DataChannel Transport Contract (`pkg/p2p/dcnet`)
+## End-to-End Demo Walkthrough
 
-The `pkg/p2p/dcnet` package implements **§10.3 (Transport, Adapter, and Write Backpressure Contract)** over Pion WebRTC v4:
-
-- **Detached Stream Adapter (`dcnet.Conn`):** Wraps a detached Pion `DataChannel` (`DetachWithDeadline`) into a standard `net.Conn`.
-- **16 KiB Write Framing & 256 KiB Send Buffer Ceiling:** `Conn.Write` serializes writes per channel, splits payloads into `<= 16 KiB` chunks (`MaxChunkSize`), and enforces `BufferedAmount() + chunkLen <= 256 KiB` (`MaxBufferedAmount`).
-- **Race-Free Backpressure Signaling:** Configures `BufferedAmountLowThreshold` at `128 KiB` (`BufferedAmountLowMark`) and drains stale notifications before performing a double-check on `BufferedAmount()` to prevent lost wake-ups.
-- **Residual Read Buffering & Empty SCTP Messages:** `Conn.Read` buffers unread bytes across small `Read(p)` calls and ignores 0-byte SCTP messages rather than treating them as `io.EOF`.
-- **16 Active Channels Budget (`dcnet.Session`):** Enforces a strict 16-channel concurrency budget per `PeerConnection` (`MaxActiveChannels`), exposing `Session.Transport()` (`*http.Transport`) on the visitor side and `net.Listener` (`Accept`, `Addr`, `Close`) on the publisher side.
-
----
-
-## Local Site Configuration (`alt.yaml` v1)
-
-`alt.yaml` defines local routing rules for `alt dev` and `alt publish`:
-
-```yaml
-version: 1
-sites:
-  myproject.alt:
-    routes:
-      - match: /api/*
-        upstream: http://localhost:8080
-        stripPrefix: false
-      - match: /*
-        upstream: http://127.0.0.1:3000
-  static.alt:
-    routes:
-      - match: /*
-        static:
-          dir: ./dist
-          spaFallback: true
-```
-
-Validate any configuration file using the CLI:
+### 1. Run the Test Suite
 
 ```bash
-go run ./cmd/alt config validate ./alt.yaml
+go test ./...
+go test -race ./...
+go vet ./...
 ```
 
----
+### 2. Local Override Route (`alt run register.alt --port 3000`)
 
-## Getting Started & Running Tests
-
-### Prerequisites
-
-- **Go 1.22+** (tested with Go 1.25 on macOS `darwin/arm64`)
-
-### Build the CLI
-
-```bash
-go build -o bin/alt ./cmd/alt
-./bin/alt --help
-```
-
-### Run a local HTTPS proxy without changing the operating system
-
-Start an HTTP application on port 3000, then run:
+Start any local HTTP server on port `3000` (for example `python3 -m http.server 3000 --bind 127.0.0.1`), then run:
 
 ```bash
 go run ./cmd/alt run register.alt \
   --port 3000 \
   --listen 127.0.0.1:8443 \
-  --state-dir /tmp/alt-demo-ca \
-  --tld alt
+  --dns-listen 127.0.0.1:15353 \
+  --state-dir /tmp/alt-demo-state \
+  --profile examples/demo-bootstrap/profile.yaml
 ```
 
-The command prints a `curl --resolve ... --cacert ...` invocation that verifies
-the generated namespace-constrained CA and routes the request to the local app.
-It intentionally does not modify DNS, the system trust store, `/etc`, or
-`launchd`.
-
-For a development fork using another namespace, pass `--tld mesh` and use a
-name such as `register.mesh`. The final network-profile format will also bind
-records to a network ID so that signed records cannot be replayed between
-independent networks.
-
-### Run the Test Suite (with Race Detector)
-
-Run the Phase 0 slow-reader backpressure and byte-integrity test in `pkg/p2p/dcnet`:
+Verify HTTPS routing (using the generated namespace-constrained CA) and the local DNS stub without modifying your OS:
 
 ```bash
-go test -v -race ./pkg/p2p/dcnet
+curl -i --resolve register.alt:8443:127.0.0.1 \
+  --cacert /tmp/alt-demo-state/ca.crt \
+  https://register.alt:8443/
+
+dig @127.0.0.1 -p 15353 register.alt A
 ```
 
-Run the entire unit and integration test suite across all packages:
+Notice `X-Alt-Resolution: local-override` in the HTTP response headers.
+
+### 3. Removing the Local Override → Verified IPFS Resolution of `register.alt`
+
+#### Option A: Using a local Kubo IPFS node (if `ipfs` is installed)
 
 ```bash
-go test -v -race ./...
+# Import the raw manifest block and verify its CIDv1 matches profile.yaml:
+ipfs block put --cid-codec raw --mhtype sha2-256 examples/demo-bootstrap/manifest.json
+# Expected CID: bafkreibwn5a377xoxrx3coliwddaptc27t67nizuwvtkmdnawmglqdjnce
 ```
 
+Then start `alt run` without `--port`, pointing `--gateways` to your local IPFS gateway (e.g., `http://127.0.0.1:8080`).
+
+#### Option B: Using the built-in loopback IPFS raw-block gateway (no external daemon needed)
+
+Terminal 1 — start the loopback IPFS gateway serving `examples/demo-bootstrap/manifest.json`:
+
+```bash
+go run ./cmd/alt-demo-gateway \
+  --listen 127.0.0.1:18080 \
+  --manifest examples/demo-bootstrap/manifest.json
+```
+
+Terminal 2 — run `alt run` **without** `--port` (removing the local override so `daemon.Engine` falls back to IPFS resolution):
+
+```bash
+go run ./cmd/alt run \
+  --listen 127.0.0.1:8443 \
+  --state-dir /tmp/alt-demo-state \
+  --profile examples/demo-bootstrap/profile.yaml
+```
+
+Terminal 3 — query `https://register.alt:8443/`:
+
+```bash
+curl -i --resolve register.alt:8443:127.0.0.1 \
+  --cacert /tmp/alt-demo-state/ca.crt \
+  https://register.alt:8443/
+```
+
+`ALT` fetches `bafkreibwn5a377xoxrx3coliwddaptc27t67nizuwvtkmdnawmglqdjnce` from `http://127.0.0.1:18080/ipfs/<cid>?format=raw`, verifies the SHA-256 CIDv1 digest prior to JSON parsing, verifies the `alt-dev-demo-v1` Ed25519 authority and owner signatures, caches the verified record monotonically, and proxies to the signed target (`X-Alt-Resolution: verified-record`).
+
+### 4. Regenerating Non-Production Bootstrap Keys & Manifest
+
+Private keys must **never** be stored inside the repository. `cmd/alt-bootstrap-gen` enforces an external `--keys-dir` (`0700` directory, `0600` key files) and writes only public keys and the CIDv1 into `examples/demo-bootstrap`:
+
+```bash
+go run ./cmd/alt-bootstrap-gen \
+  --keys-dir "$HOME/.config/alt/dev-demo-keys" \
+  --out-dir examples/demo-bootstrap \
+  --network-id alt-dev-demo-v1 \
+  --tld alt \
+  --domain register.alt \
+  --key-id dev-demo-registry-2026-not-for-prod \
+  --target https://example.org \
+  --gateway http://127.0.0.1:18080
+```
+
+### 5. Optional One-Time macOS Browser Trust & DNS Setup (Manual & Reversible)
+
+`alt run` never touches `/etc`, Keychain, or `launchd`. If you want `https://register.alt` to resolve directly in a local browser during manual testing:
+
+1. **Trust the generated namespace-constrained CA** (constrained via X.509 `PermittedDNSDomains` to `.alt` only):
+   ```bash
+   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /tmp/alt-demo-state/ca.crt
+   ```
+2. **Create `/etc/resolver/alt`** pointing to your `--dns-listen` UDP port (and forward loopback TCP `443` via `pfctl` if not specifying `:8443`):
+   ```bash
+   sudo mkdir -p /etc/resolver
+   printf "nameserver 127.0.0.1\nport 15353\n" | sudo tee /etc/resolver/alt
+   ```
+3. **Remove when finished:**
+   ```bash
+   sudo rm -f /etc/resolver/alt
+   sudo security delete-certificate -c "ALT Device Local Root CA" /Library/Keychains/System.keychain
+   ```
+
+---
+
+## Licensing & Brand Notice
+
+- **Source Code:** Licensed under the [Apache License, Version 2.0](LICENSE).
+- **Documentation:** Dual-licensed under [Apache-2.0](LICENSE) and [CC BY 4.0](LICENSE-DOCS-CC-BY-4.0) (https://creativecommons.org/licenses/by/4.0/).
+- **Trademarks & Official Trust Root:** The "ALT" name and logos are excluded brand assets. The official `.alt` network profile, production registry keys, and hosted services are an operational trust root separate from the open-source engine. See [NOTICE](NOTICE) for details.

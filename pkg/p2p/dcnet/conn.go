@@ -260,4 +260,3 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	c.signalWakeup()
 	return c.raw.SetWriteDeadline(t)
 }
-

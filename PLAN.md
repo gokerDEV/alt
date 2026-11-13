@@ -47,9 +47,9 @@ Acceptance checks:
 - [x] Make repository documentation English.
 - [x] Keep comments and user-facing messages English.
 - [x] Introduce a shared configurable namespace policy.
-- [ ] Select an OSI-approved license. Apache-2.0 is recommended, but the repository owner must explicitly choose it.
-- [ ] Add `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `SECURITY.md`.
-- [ ] Add a feature-status table that separates implemented, demo, beta, and planned behavior.
+- [x] Select an OSI-approved license. Apache-2.0 is recommended, but the repository owner must explicitly choose it.
+- [x] Add `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `SECURITY.md`.
+- [x] Add a feature-status table that separates implemented, demo, beta, and planned behavior.
 
 ### B — Configurable namespace
 
@@ -68,9 +68,9 @@ branding
 - [x] Add `pkg/names` as the single source of truth for TLD/domain validation.
 - [x] Make DNS and the local CA namespace-aware while retaining `.alt` defaults.
 - [x] Add TLD-aware config and ownership-record verification APIs.
-- [ ] Replace the temporary `ALT_TLD` switch with a versioned network profile.
-- [ ] Bind records to `networkId`; records must not be replayable between independent networks.
-- [ ] Include the network ID in every signature domain-separation prefix.
+- [x] Replace the temporary `ALT_TLD` switch with a versioned network profile.
+- [x] Bind records to `networkId`; records must not be replayable between independent networks.
+- [x] Include the network ID in every signature domain-separation prefix.
 
 Proposed profile:
 
@@ -90,14 +90,14 @@ reservedNames: [register]
 
 ### C — Local run vertical slice
 
-- [ ] Add `alt run <name> --port <port>` as a foreground demo command.
-- [ ] Build an in-memory site entry and register it in `daemon.Engine`.
-- [ ] Load or create the device CA in a user-scoped state directory.
-- [ ] Start HTTPS on an explicit high loopback port by default.
-- [ ] Add optional DNS serving for the selected TLD.
-- [ ] Handle SIGINT/SIGTERM and drain in-flight requests.
-- [ ] Add `--state-dir`, `--listen`, `--dns-listen`, and `--tld` flags.
-- [ ] Add an end-to-end smoke test.
+- [x] Add `alt run <name> --port <port>` as a foreground demo command.
+- [x] Build an in-memory site entry and register it in `daemon.Engine`.
+- [x] Load or create the device CA in a user-scoped state directory.
+- [x] Start HTTPS on an explicit high loopback port by default.
+- [x] Add optional DNS serving for the selected TLD.
+- [x] Handle SIGINT/SIGTERM and drain in-flight requests.
+- [x] Add `--state-dir`, `--listen`, `--dns-listen`, and `--tld` flags.
+- [x] Add an end-to-end smoke test.
 
 Target command:
 
@@ -120,25 +120,25 @@ type RecordSource interface {
 }
 ```
 
-- [ ] Define a manifest containing `networkId`, ownership, and target records.
-- [ ] Add `pkg/resolver` with source-independent verification and monotonic cache rules.
-- [ ] Add a fixture source for deterministic tests.
-- [ ] Add an HTTP IPFS gateway source that fetches an explicitly configured CID.
-- [ ] Verify content addressing before trusting decoded records.
-- [ ] Enforce byte limits, timeouts, content type, and strict JSON decoding.
-- [ ] Cache only fully verified records.
-- [ ] Test bad signatures, wrong networks, rollback, expiry, and malformed JSON.
+- [x] Define a manifest containing `networkId`, ownership, and target records.
+- [x] Add `pkg/resolver` with source-independent verification and monotonic cache rules.
+- [x] Add a fixture source for deterministic tests.
+- [x] Add an HTTP IPFS gateway source that fetches an explicitly configured CID.
+- [x] Verify content addressing before trusting decoded records.
+- [x] Enforce byte limits, timeouts, content type, and strict JSON decoding.
+- [x] Cache only fully verified records.
+- [x] Test bad signatures, wrong networks, rollback, expiry, and malformed JSON.
 
 A fixed manifest CID is acceptable today. Add IPNS only after the fixed-CID path is correct.
 
 ### E — `register.alt` bootstrap
 
-- [ ] Generate a development authority key outside the repository.
-- [ ] Sign ownership and target records for `register.alt`.
-- [ ] Publish the manifest to a local IPFS node or selected gateway.
-- [ ] Put only the public key and CID in the demo profile.
-- [ ] Resolve, verify, and route `register.alt`.
-- [ ] Document regeneration; never commit a private key.
+- [x] Generate a development authority key outside the repository.
+- [x] Sign ownership and target records for `register.alt`.
+- [x] Publish the manifest to a local IPFS node or selected gateway.
+- [x] Put only the public key and CID in the demo profile.
+- [x] Resolve, verify, and route `register.alt`.
+- [x] Document regeneration; never commit a private key.
 
 Development keys must be visibly non-production. Production keys require a separate ceremony and secure storage.
 

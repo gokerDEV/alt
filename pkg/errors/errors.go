@@ -68,4 +68,3 @@ func IsCode(err error, code Code) bool {
 	}
 	return false
 }
-

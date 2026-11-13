@@ -21,4 +21,3 @@ func TestErrors(t *testing.T) {
 		t.Fatalf("expected errors.Is to match underlying cause")
 	}
 }
-

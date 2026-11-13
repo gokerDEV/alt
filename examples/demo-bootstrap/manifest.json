@@ -1,0 +1,33 @@
+{
+  "schema": "alt.manifest.v1",
+  "networkId": "alt-dev-demo-v1",
+  "generatedAt": "2026-11-12T16:45:05Z",
+  "records": {
+    "register.alt": {
+      "ownership": {
+        "schema": "alt.ownership.v1",
+        "networkId": "alt-dev-demo-v1",
+        "domain": "register.alt",
+        "accountId": "acct_dev_demo_bootstrap",
+        "ownerPublicKey": "ed25519:TeRpO8lzFISycJrIEU80pFKwdb56SQaIjxDm+tDCwvE=",
+        "generation": 1,
+        "issuedAt": "2026-11-12T16:45:05Z",
+        "expiresAt": "2036-11-09T16:45:05Z",
+        "issuerKeyId": "dev-demo-registry-2026-not-for-prod",
+        "signature": "qxETKcOxvetX/L560Qwe4XC5NjBElG1SifY1lhmyZfjGalZTAawURJEhJw1ufGPIQy6xXoMJLbrHzBg4r4W2Bg=="
+      },
+      "target": {
+        "schema": "alt.target.v1",
+        "networkId": "alt-dev-demo-v1",
+        "domain": "register.alt",
+        "ownershipGeneration": 1,
+        "sequence": 1,
+        "mode": "https",
+        "target": "https://example.org",
+        "issuedAt": "2026-11-12T16:45:05Z",
+        "expiresAt": "2036-11-09T16:45:05Z",
+        "signature": "yVdP90JfSsPo/mWcTiKIUz2pU9c9L1QsWIgcAj1d53oniBaAM4jFjq08ABU+xM0PpUi2mcdzL9SaWz78sBuGBA=="
+      }
+    }
+  }
+}

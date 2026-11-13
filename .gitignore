@@ -1,0 +1,16 @@
+# Binaries and build artifacts
+/bin/
+/alt
+/alt-bootstrap-gen
+/alt-demo-gateway
+*.exe
+*.test
+*.out
+
+# Private keys & local CA state (NEVER commit private key material)
+*.key
+*.pem
+!*.pub.pem
+.alt-state/
+dev-keys/
+

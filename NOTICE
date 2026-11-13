@@ -1,0 +1,12 @@
+ALT — Reusable Private-Namespace Engine & Client
+Copyright 2026 ALT Contributors
+
+Licensing Summary:
+- Source code in this repository is licensed under the Apache License, Version 2.0 (see LICENSE or http://www.apache.org/licenses/LICENSE-2.0).
+- Documentation in this repository is dual-licensed under the Apache License, Version 2.0 (see LICENSE) and the Creative Commons Attribution 4.0 International License (CC BY 4.0; see LICENSE-DOCS-CC-BY-4.0 or https://creativecommons.org/licenses/by/4.0/), at your option.
+
+Trademark & Operational Trust Root Notice:
+- In accordance with Section 6 of the Apache License, Version 2.0, the "ALT" name, logos, and associated branding are brand assets excluded from the license grant, except as required for reasonable and customary attribution.
+- The official `.alt` network profile, production registry authority keys, `register.alt` allocation service, and hosted infrastructure constitute an operational trust root separate from this open-source codebase.
+- Downstream forks and independent operators deploying their own private-TLD networks MUST configure a distinct `networkId`, generate independent registry authority keys, and use distinct branding so that users and records are never confused across independent networks.
+

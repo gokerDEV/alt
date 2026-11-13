@@ -51,4 +51,3 @@ func TestHandleQueryAltAndNonAlt(t *testing.T) {
 		t.Fatalf("expected RCODE=5 (REFUSED) for non-.alt domain, got %d", rcode)
 	}
 }
-
