@@ -3,7 +3,9 @@ package records_test
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -162,6 +164,53 @@ func TestOwnershipAndTargetVerification(t *testing.T) {
 		_ = badP2P.Sign(ownerPriv)
 		if err := badP2P.Verify(cert, now); !errors.Is(err, records.ErrInvalidTargetMode) {
 			t.Fatalf("expected ErrInvalidTargetMode for WSS endpoint %q, got: %v", badWSS, err)
+		}
+	}
+
+	// Verify KeyChallengePayload signing & verification
+	chPayload := &records.KeyChallengePayload{
+		AccountID:      "gh:123456",
+		OwnerPublicKey: records.FormatPublicKey(ownerPub),
+		Nonce:          "base64url_nonce_123",
+		Purpose:        records.KeyChallengePurposeBindOwnerKey,
+		ExpiresAt:      "2026-11-13T14:00:00Z",
+	}
+	chSig, err := chPayload.Sign(profile.DefaultNetworkID, ownerPriv)
+	if err != nil {
+		t.Fatalf("KeyChallengePayload.Sign failed: %v", err)
+	}
+	if err := chPayload.Verify(profile.DefaultNetworkID, chSig); err != nil {
+		t.Fatalf("KeyChallengePayload.Verify failed: %v", err)
+	}
+	if err := chPayload.Verify("foreign-net-v1", chSig); !errors.Is(err, records.ErrInvalidSignature) {
+		t.Fatalf("expected ErrInvalidSignature on foreign network challenge replay, got: %v", err)
+	}
+
+	// Cross-language golden fixture check when invoked from alt-registry TypeScript test suite
+	if rawGolden := os.Getenv("ALT_TS_GOLDEN_FIXTURE"); rawGolden != "" {
+		var golden struct {
+			AuthorityPub     string                      `json:"authorityPub"`
+			ChallengePayload records.KeyChallengePayload `json:"challengePayload"`
+			ChallengeSig     string                      `json:"challengeSig"`
+			Cert             records.OwnershipCertificate `json:"cert"`
+			Target           records.TargetRecord         `json:"target"`
+		}
+		if err := json.Unmarshal([]byte(rawGolden), &golden); err != nil {
+			t.Fatalf("unmarshal ALT_TS_GOLDEN_FIXTURE: %v", err)
+		}
+		tsAuthPub, err := records.ParsePublicKey(golden.AuthorityPub)
+		if err != nil {
+			t.Fatalf("parse TS authorityPub: %v", err)
+		}
+		refTime := time.Date(2026, 11, 13, 13, 0, 0, 0, time.UTC)
+		if err := golden.ChallengePayload.Verify("alt-main-v1", golden.ChallengeSig); err != nil {
+			t.Fatalf("Go failed to verify TS-signed KeyChallengePayload: %v", err)
+		}
+		if err := golden.Cert.Verify(tsAuthPub, refTime); err != nil {
+			t.Fatalf("Go failed to verify TS-signed OwnershipCertificate: %v", err)
+		}
+		if err := golden.Target.Verify(&golden.Cert, refTime); err != nil {
+			t.Fatalf("Go failed to verify TS-signed TargetRecord: %v", err)
 		}
 	}
 }

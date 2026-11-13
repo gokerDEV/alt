@@ -25,6 +25,18 @@ const (
 	// DemoNetworkID is the visibly non-production network identifier for the local/IPFS demo slice.
 	DemoNetworkID = "alt-dev-demo-v1"
 
+	// DefaultAuthorityKeyID is the official .alt registry authority key ID.
+	DefaultAuthorityKeyID = "registry-2026"
+
+	// DefaultAuthorityPublicKey is the official .alt registry authority Ed25519 public key.
+	DefaultAuthorityPublicKey = "ed25519:dYbt6Mh+nnb1wYq4NfDY7FeMbQ84QnpOxRnibXy7/0w="
+
+	// DefaultBootstrapManifestCID is the immutable CIDv1 raw manifest containing register.alt -> https://alt.goker.dev.
+	DefaultBootstrapManifestCID = "bafkreidw3acn7s3vy6xmuyn2fui4sp3fxjfpnzm6m5mm6f76kueq3janra"
+
+	// DefaultIPNSRoot is the self-certifying Ed25519 IPNS root publishing the official .alt registry manifest.
+	DefaultIPNSRoot = "k51qzi5uqu5dggi62jp2mtv4rx8jahmzt8qh4o2bpnnxb4podywa89lwl8r71b"
+
 	ed25519Prefix = "ed25519:"
 )
 
@@ -88,6 +100,47 @@ func Default() *Profile {
 		Branding:      BrandingConfig{Name: "ALT"},
 		parsedKeys:    make(map[string]ed25519.PublicKey),
 	}
+	return p
+}
+
+// Official returns the official public .alt network profile pinned to the registry authority public key,
+// immutable bootstrap manifest CID (`register.alt` -> `https://alt.goker.dev`), IPNS root, and reserved names.
+func Official() *Profile {
+	p := &Profile{
+		Version:   1,
+		NetworkID: DefaultNetworkID,
+		TLD:       names.DefaultTLD,
+		RegistryKeys: []RegistryKey{
+			{
+				ID:        DefaultAuthorityKeyID,
+				PublicKey: DefaultAuthorityPublicKey,
+			},
+		},
+		Resolver: ResolverConfig{
+			ManifestCID: DefaultBootstrapManifestCID,
+			IPNSRoot:    DefaultIPNSRoot,
+			Gateways: []string{
+				"https://ipfs.filebase.io",
+				"https://ipfs.io",
+			},
+		},
+		ReservedNames: []string{
+			"register",
+			"www",
+			"api",
+			"admin",
+			"status",
+			"search",
+			"support",
+			"mail",
+			"ns",
+			"root",
+			"alt",
+		},
+		Branding:   BrandingConfig{Name: "ALT"},
+		parsedKeys: make(map[string]ed25519.PublicKey),
+	}
+	_ = p.Validate()
 	return p
 }
 

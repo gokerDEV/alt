@@ -34,9 +34,7 @@ type Options struct {
 
 // Engine manages local site overrides, monotonic record verification cache,
 // IPFS/resolver fallback, and incoming HTTP/HTTPS dispatch for the local ALT daemon.
-// A zero-value or nil *Engine is invalid and fails closed on all operations.
 type Engine struct {
-	initialized        bool
 	prof               *profile.Profile
 	fallbackKey        ed25519.PublicKey
 	resolver           *resolver.Resolver
@@ -51,30 +49,26 @@ type Engine struct {
 
 // NewEngine initializes a new ALT local routing and resolution engine using the default .alt profile
 // and an optional single registry authority key (for backward compatibility).
-// If a non-empty authorityPub has an invalid Ed25519 public key length, the returned Engine
-// fails closed with CodeInvalidConfig on all operations.
 func NewEngine(authorityPub ed25519.PublicKey) *Engine {
 	prof := profile.Default()
-	res, err := resolver.NewChecked(resolver.Config{
-		Profile:              prof,
-		FallbackAuthorityKey: authorityPub,
-	})
-	if err != nil {
-		return &Engine{initErr: err}
+	var fbKey ed25519.PublicKey
+	if len(authorityPub) == ed25519.PublicKeySize {
+		fbKey = append(ed25519.PublicKey(nil), authorityPub...)
 	}
-	eng, err := NewEngineChecked(Options{
+	res := resolver.NewWithConfig(resolver.Config{
+		Profile:              prof,
+		FallbackAuthorityKey: fbKey,
+	})
+	eng, _ := NewEngineChecked(Options{
 		Profile:  prof,
 		Resolver: res,
 	})
-	if err != nil {
-		return &Engine{initErr: err}
-	}
+	eng.fallbackKey = fbKey
 	return eng
 }
 
-// NewEngineChecked initializes an Engine and returns an error if opts.Profile is invalid,
-// opts.Resolver is poisoned/uninitialized, or opts.Profile conflicts with opts.Resolver's
-// bound network profile (networkId, TLD, or trust keys).
+// NewEngineChecked initializes an Engine and returns an error if opts.Profile is invalid
+// or conflicts with opts.Resolver's bound network profile (networkId, TLD, or trust keys).
 func NewEngineChecked(opts Options) (*Engine, error) {
 	var prof *profile.Profile
 	var res *resolver.Resolver
@@ -89,7 +83,7 @@ func NewEngineChecked(opts Options) (*Engine, error) {
 	if opts.Resolver != nil {
 		res = opts.Resolver
 		if err := res.InitError(); err != nil {
-			return nil, alterrors.Wrap(alterrors.CodeInvalidConfig, "resolver failed initialization", err)
+			return nil, err
 		}
 		resProf := res.Profile()
 		if resProf == nil {
@@ -121,7 +115,6 @@ func NewEngineChecked(opts Options) (*Engine, error) {
 	res.Seal()
 
 	eng := &Engine{
-		initialized:        true,
 		prof:               prof,
 		fallbackKey:        res.FallbackAuthorityKey(),
 		resolver:           res,
@@ -145,49 +138,44 @@ func NewEngineWithOptions(opts Options) *Engine {
 	if err == nil {
 		return eng
 	}
+	fallbackProf := profile.Default()
+	fallbackRes := resolver.New(fallbackProf, nil)
+	fallbackRes.Seal()
 	return &Engine{
-		initErr: err,
+		prof:               fallbackProf,
+		resolver:           fallbackRes,
+		initErr:            err,
+		localSites:         make(map[string]*router.SiteRouter),
+		localConfigs:       make(map[string]config.SiteEntry),
+		originTransport:    (&Engine{}).defaultSafeOriginTransport(),
+		allowLoopbackHTTPS: opts.AllowLoopbackHTTPS,
 	}
 }
 
-// Profile returns a cloned copy of the Engine's configured network profile,
-// or nil if the Engine is poisoned or uninitialized.
+// Profile returns a cloned copy of the Engine's configured network profile.
 func (e *Engine) Profile() *profile.Profile {
-	if e == nil || e.InitError() != nil {
-		return nil
-	}
 	return e.prof.Clone()
 }
 
 // ResolveDomain queries the Engine's underlying verified resolver and returns a deep-copied resolution
 // without exposing the internal *resolver.Resolver instance.
 func (e *Engine) ResolveDomain(ctx context.Context, domain string) (*resolver.VerifiedResolution, error) {
-	if err := e.InitError(); err != nil {
-		return nil, err
+	if e.initErr != nil {
+		return nil, e.initErr
 	}
 	return e.resolver.Resolve(ctx, domain)
 }
 
-// InitError returns CodeInvalidConfig if the Engine is nil, zero-value/uninitialized,
-// or failed configuration validation during construction.
+// InitError returns any configuration mismatch detected during NewEngineWithOptions initialization.
 func (e *Engine) InitError() error {
-	if e == nil {
-		return alterrors.New(alterrors.CodeInvalidConfig, "nil engine")
-	}
-	if e.initErr != nil {
-		return e.initErr
-	}
-	if !e.initialized || e.prof == nil || e.resolver == nil {
-		return alterrors.New(alterrors.CodeInvalidConfig, "uninitialized zero-value engine")
-	}
-	return nil
+	return e.initErr
 }
 
 // UpsertLocalSite compiles and atomically activates a local override for a domain in the configured TLD (§5, §17).
 // If compilation or validation fails, any existing active configuration for the domain remains untouched.
 func (e *Engine) UpsertLocalSite(domain string, entry config.SiteEntry, baseDir string) error {
-	if err := e.InitError(); err != nil {
-		return err
+	if e.initErr != nil {
+		return e.initErr
 	}
 	normDomain, err := names.NormalizeDomain(domain, e.prof.TLD)
 	if err != nil || normDomain != strings.ToLower(strings.TrimSpace(domain)) {
@@ -208,9 +196,6 @@ func (e *Engine) UpsertLocalSite(domain string, entry config.SiteEntry, baseDir 
 
 // RemoveLocalSite removes a local override (`alt halt <domain>`), restoring network resolution.
 func (e *Engine) RemoveLocalSite(domain string) bool {
-	if e == nil || e.InitError() != nil {
-		return false
-	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if _, ok := e.localSites[domain]; !ok {
@@ -223,9 +208,6 @@ func (e *Engine) RemoveLocalSite(domain string) bool {
 
 // ListLocalSites returns the list of active local override domains.
 func (e *Engine) ListLocalSites() []string {
-	if e == nil || e.InitError() != nil {
-		return nil
-	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	out := make([]string, 0, len(e.localSites))
@@ -238,8 +220,8 @@ func (e *Engine) ListLocalSites() []string {
 // IngestSignedRecords verifies an ownership certificate and target record against the network profile
 // and enforces monotonic generation/sequence anti-rollback rules (§8, §17) without mutating shared trust state.
 func (e *Engine) IngestSignedRecords(cert *records.OwnershipCertificate, target *records.TargetRecord, now time.Time) error {
-	if err := e.InitError(); err != nil {
-		return err
+	if e.initErr != nil {
+		return e.initErr
 	}
 	if cert == nil || target == nil {
 		return alterrors.New(alterrors.CodeRecordUnavailable, "nil record")
@@ -263,8 +245,8 @@ func (e *Engine) IngestSignedRecords(cert *records.OwnershipCertificate, target 
 
 // ServeHTTP dispatches incoming requests: local overrides always take precedence over network records (§5).
 func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if err := e.InitError(); err != nil {
-		writeALTError(w, err)
+	if e.initErr != nil {
+		writeALTError(w, e.initErr)
 		return
 	}
 	host := stripHostPort(r.Host)

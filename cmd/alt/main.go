@@ -39,6 +39,10 @@ func main() {
 		err = runSetup(args)
 	case "login":
 		err = runLogin(args)
+	case "logout":
+		err = runLogout(args)
+	case "account":
+		err = runAccount(args)
 	case "dev":
 		err = runDev(args)
 	case "run":
@@ -80,12 +84,14 @@ Usage:
 
 Commands:
   setup                           Initialize device keys, local CA, .alt resolver, and loopback service (planned)
-  login <github | key.pub>        Authenticate account via GitHub device flow or SSH key challenge (planned)
+  login github [flags]            Authenticate account via GitHub Device Flow and exchange ALT CLI session
+  logout                          Revoke server CLI session and remove local token
+  account                         Show authenticated GitHub account, bound owner key, and .alt domain status
   dev <domain> [flags]            Start local development override (shadows network resolution locally)
-  run [domain] [flags]            Run foreground loopback HTTPS proxy, optional DNS stub, and IPFS resolver
-  publish <domain> [flags]        Publish local application over WebRTC P2P or update signed HTTPS target (planned)
+  run [domain] [flags]            Run foreground loopback HTTPS proxy, optional DNS stub, and IPFS/IPNS resolver
+  publish <domain> --target <url> Sign and publish an HTTPS target record (alt.target.v1) for your .alt domain
   config validate <path>          Validate alt.yaml or network profile schema without applying changes
-  register <domain.alt>           Register a .alt domain with atomic quota verification (planned)
+  register <domain.alt>           Bind local Ed25519 owner key and register a .alt domain
   list                            List active local overrides, configured publications, and domain statuses
   halt <domain.alt>               Stop a local override/P2P session or publish a disabled HTTPS target record
   status                          Display resolver, CA, network, signaling, and active session status
@@ -129,6 +135,7 @@ func runForegroundWithContext(ctx context.Context, args []string, readyCh chan<-
 	profilePath := flags.String("profile", os.Getenv("ALT_PROFILE"), "path to versioned network profile YAML")
 	stateDir := flags.String("state-dir", "", "directory for the device-local CA")
 	manifestCID := flags.String("manifest-cid", "", "override manifest CIDv1 for IPFS gateway resolution")
+	ipnsRoot := flags.String("ipns-root", "", "override self-certifying k51... IPNS root for resolution")
 	manifestFile := flags.String("manifest-file", "", "optional local content-addressed manifest fixture file")
 	gatewaysCSV := flags.String("gateways", "", "comma-separated IPFS HTTP gateway URLs (overrides profile gateways)")
 	if err := flags.Parse(flagArgs); err != nil {
@@ -145,6 +152,13 @@ func runForegroundWithContext(ctx context.Context, args []string, readyCh chan<-
 
 	if *manifestCID != "" {
 		prof.Resolver.ManifestCID = strings.TrimSpace(*manifestCID)
+		// When an explicit fixed CID is requested via flag, disable IPNS unless --ipns-root was also passed.
+		if *ipnsRoot == "" {
+			prof.Resolver.IPNSRoot = ""
+		}
+	}
+	if *ipnsRoot != "" {
+		prof.Resolver.IPNSRoot = strings.TrimSpace(*ipnsRoot)
 	}
 	if *gatewaysCSV != "" {
 		parts := strings.Split(*gatewaysCSV, ",")
@@ -369,14 +383,25 @@ func resolveNetworkProfile(profilePath, tldOverride string) (*profile.Profile, e
 	}
 
 	if strings.TrimSpace(tldOverride) != "" {
+		if strings.EqualFold(strings.TrimSpace(tldOverride), names.DefaultTLD) {
+			return profile.Official(), nil
+		}
 		return profile.ForLocalTLD(tldOverride)
 	}
-	return profile.Default(), nil
+	return profile.Official(), nil
 }
 
 func buildRecordSource(prof *profile.Profile, manifestFile string) (resolver.RecordSource, error) {
 	if strings.TrimSpace(manifestFile) != "" {
 		return resolver.LoadFixtureSourceFile(manifestFile, prof.Resolver.ManifestCID, prof.NetworkID)
+	}
+	if prof.Resolver.IPNSRoot != "" && len(prof.Resolver.Gateways) > 0 {
+		return resolver.NewIPNSSource(resolver.IPNSOptions{
+			IPNSRoot:        prof.Resolver.IPNSRoot,
+			BootstrapCID:    prof.Resolver.ManifestCID,
+			ExpectedNetwork: prof.NetworkID,
+			Gateways:        prof.Resolver.Gateways,
+		})
 	}
 	if prof.Resolver.ManifestCID != "" && len(prof.Resolver.Gateways) > 0 {
 		return resolver.NewGatewaySource(resolver.GatewayOptions{
@@ -533,32 +558,6 @@ func runDev(args []string) error {
 
 func runSetup(args []string) error {
 	fmt.Println("alt setup: privileged OS installer is planned and intentionally out of scope for the non-privileged demo slice; use `alt run` for foreground local HTTPS.")
-	return nil
-}
-
-func runLogin(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: alt login <github | ~/.ssh/id_ed25519.pub>")
-	}
-	fmt.Printf("alt login: account authentication via %s is planned (non-goal in current demo slice).\n", args[0])
-	return nil
-}
-
-func runPublish(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: alt publish <domain.alt> [--port <p> | --target <https://...> | --config <file>]")
-	}
-	domain := normalizeCLIDomain(args[0])
-	fmt.Printf("alt publish: network publication workflow for %s is planned; use cmd/alt-bootstrap-gen for signed demo manifests.\n", domain)
-	return nil
-}
-
-func runRegister(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: alt register <domain.alt>")
-	}
-	domain := normalizeCLIDomain(args[0])
-	fmt.Printf("alt register: hosted registration for %s is planned.\n", domain)
 	return nil
 }
 

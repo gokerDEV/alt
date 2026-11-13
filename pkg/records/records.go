@@ -19,8 +19,11 @@ import (
 )
 
 const (
-	SchemaOwnershipV1 = "alt.ownership.v1"
-	SchemaTargetV1    = "alt.target.v1"
+	SchemaOwnershipV1    = "alt.ownership.v1"
+	SchemaTargetV1       = "alt.target.v1"
+	SchemaKeyChallengeV1 = "alt.key-challenge.v1"
+
+	KeyChallengePurposeBindOwnerKey = "bind_owner_key"
 
 	TargetModeHTTPS = "https"
 	TargetModeP2P   = "p2p"
@@ -122,6 +125,71 @@ type canonicalTarget struct {
 	SignalingEndpoints  []string `json:"signalingEndpoints,omitempty"`
 	IssuedAt            string   `json:"issuedAt"`
 	ExpiresAt           string   `json:"expiresAt"`
+}
+
+// KeyChallengePayload represents the single-use CLI owner-key binding challenge payload
+// signed over `alt.key-challenge.v1\x00<networkId>\x00<compact-json>`.
+type KeyChallengePayload struct {
+	AccountID      string `json:"accountId"`
+	OwnerPublicKey string `json:"ownerPublicKey"`
+	Nonce          string `json:"nonce"`
+	Purpose        string `json:"purpose"`
+	ExpiresAt      string `json:"expiresAt"`
+}
+
+// SigningBytes returns the domain-separated canonical byte representation of KeyChallengePayload.
+func (p *KeyChallengePayload) SigningBytes(networkID string) ([]byte, error) {
+	if strings.TrimSpace(networkID) == "" {
+		return nil, ErrInvalidNetworkID
+	}
+	if _, err := ParsePublicKey(p.OwnerPublicKey); err != nil {
+		return nil, err
+	}
+	if _, err := time.Parse("2006-01-02T15:04:05Z", p.ExpiresAt); err != nil {
+		return nil, fmt.Errorf("records: challenge expiresAt must use whole-second UTC RFC3339: %w", err)
+	}
+	payload, err := json.Marshal(KeyChallengePayload{
+		AccountID:      p.AccountID,
+		OwnerPublicKey: p.OwnerPublicKey,
+		Nonce:          p.Nonce,
+		Purpose:        p.Purpose,
+		ExpiresAt:      p.ExpiresAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	prefix := SchemaKeyChallengeV1 + "\x00" + networkID + "\x00"
+	return append([]byte(prefix), payload...), nil
+}
+
+// Sign signs the KeyChallengePayload with the owner's Ed25519 private key and returns standard padded Base64.
+func (p *KeyChallengePayload) Sign(networkID string, ownerPriv ed25519.PrivateKey) (string, error) {
+	msg, err := p.SigningBytes(networkID)
+	if err != nil {
+		return "", err
+	}
+	sig := ed25519.Sign(ownerPriv, msg)
+	return base64.StdEncoding.EncodeToString(sig), nil
+}
+
+// Verify checks the Ed25519 signature over KeyChallengePayload for the expected networkID.
+func (p *KeyChallengePayload) Verify(networkID, signatureBase64 string) error {
+	ownerPub, err := ParsePublicKey(p.OwnerPublicKey)
+	if err != nil {
+		return err
+	}
+	msg, err := p.SigningBytes(networkID)
+	if err != nil {
+		return err
+	}
+	sig, err := base64.StdEncoding.DecodeString(signatureBase64)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return ErrInvalidSignature
+	}
+	if !ed25519.Verify(ownerPub, msg, sig) {
+		return ErrInvalidSignature
+	}
+	return nil
 }
 
 // DecodeOwnershipStrict parses JSON strictly (rejecting unknown fields and trailing tokens).
