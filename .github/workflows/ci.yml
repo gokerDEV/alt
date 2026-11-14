@@ -10,8 +10,12 @@ permissions:
 
 jobs:
   verify:
-    name: Format, Vet, and Race Tests
-    runs-on: ubuntu-latest
+    name: Format, Vet, and Race Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,3 +41,9 @@ jobs:
       - name: Run unit and integration tests with race detector
         run: go test -count=1 -race ./...
 
+      - name: Build and verify macOS universal .pkg installer
+        if: matrix.os == 'macos-latest'
+        run: |
+          sh ./packaging/macos/build-pkg.sh
+          pkgutil --check-signature dist/alt-*-darwin-universal.pkg || true
+          ls -lh dist/

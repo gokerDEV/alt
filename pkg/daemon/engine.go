@@ -32,6 +32,13 @@ type Options struct {
 	AllowLoopbackHTTPS bool // Used only in deterministic local unit/smoke tests
 }
 
+// LocalSiteDetail describes an active local site override compiled into the Engine.
+type LocalSiteDetail struct {
+	Domain  string           `json:"domain"`
+	BaseDir string           `json:"baseDir"`
+	Entry   config.SiteEntry `json:"entry"`
+}
+
 // Engine manages local site overrides, monotonic record verification cache,
 // IPFS/resolver fallback, and incoming HTTP/HTTPS dispatch for the local ALT daemon.
 type Engine struct {
@@ -42,9 +49,10 @@ type Engine struct {
 	allowLoopbackHTTPS bool
 	initErr            error
 
-	mu           sync.RWMutex
-	localSites   map[string]*router.SiteRouter
-	localConfigs map[string]config.SiteEntry
+	mu            sync.RWMutex
+	localSites    map[string]*router.SiteRouter
+	localConfigs  map[string]config.SiteEntry
+	localBaseDirs map[string]string
 }
 
 // NewEngine initializes a new ALT local routing and resolution engine using the default .alt profile
@@ -52,18 +60,20 @@ type Engine struct {
 func NewEngine(authorityPub ed25519.PublicKey) *Engine {
 	prof := profile.Default()
 	var fbKey ed25519.PublicKey
-	if len(authorityPub) == ed25519.PublicKeySize {
+	if len(authorityPub) != 0 {
 		fbKey = append(ed25519.PublicKey(nil), authorityPub...)
 	}
 	res := resolver.NewWithConfig(resolver.Config{
 		Profile:              prof,
 		FallbackAuthorityKey: fbKey,
 	})
-	eng, _ := NewEngineChecked(Options{
+	eng := NewEngineWithOptions(Options{
 		Profile:  prof,
 		Resolver: res,
 	})
-	eng.fallbackKey = fbKey
+	if eng.initErr == nil {
+		eng.fallbackKey = fbKey
+	}
 	return eng
 }
 
@@ -122,6 +132,7 @@ func NewEngineChecked(opts Options) (*Engine, error) {
 		allowLoopbackHTTPS: opts.AllowLoopbackHTTPS,
 		localSites:         make(map[string]*router.SiteRouter),
 		localConfigs:       make(map[string]config.SiteEntry),
+		localBaseDirs:      make(map[string]string),
 	}
 	if eng.originTransport == nil {
 		eng.originTransport = eng.defaultSafeOriginTransport()
@@ -147,13 +158,18 @@ func NewEngineWithOptions(opts Options) *Engine {
 		initErr:            err,
 		localSites:         make(map[string]*router.SiteRouter),
 		localConfigs:       make(map[string]config.SiteEntry),
+		localBaseDirs:      make(map[string]string),
 		originTransport:    (&Engine{}).defaultSafeOriginTransport(),
 		allowLoopbackHTTPS: opts.AllowLoopbackHTTPS,
 	}
 }
 
-// Profile returns a cloned copy of the Engine's configured network profile.
+// Profile returns a cloned copy of the Engine's configured network profile,
+// or nil if the Engine failed initialization.
 func (e *Engine) Profile() *profile.Profile {
+	if e == nil || e.initErr != nil || e.prof == nil {
+		return nil
+	}
 	return e.prof.Clone()
 }
 
@@ -164,6 +180,14 @@ func (e *Engine) ResolveDomain(ctx context.Context, domain string) (*resolver.Ve
 		return nil, e.initErr
 	}
 	return e.resolver.Resolve(ctx, domain)
+}
+
+// ResolverStats returns live cache and monotonic IPNS stats without exposing the internal *resolver.Resolver.
+func (e *Engine) ResolverStats() resolver.CacheStats {
+	if e == nil || e.resolver == nil || e.initErr != nil {
+		return resolver.CacheStats{}
+	}
+	return e.resolver.Stats()
 }
 
 // InitError returns any configuration mismatch detected during NewEngineWithOptions initialization.
@@ -189,7 +213,10 @@ func (e *Engine) UpsertLocalSite(domain string, entry config.SiteEntry, baseDir 
 
 	e.mu.Lock()
 	e.localSites[normDomain] = sr
-	e.localConfigs[normDomain] = entry
+	e.localConfigs[normDomain] = cloneSiteEntry(entry)
+	if e.localBaseDirs != nil {
+		e.localBaseDirs[normDomain] = baseDir
+	}
 	e.mu.Unlock()
 	return nil
 }
@@ -203,7 +230,19 @@ func (e *Engine) RemoveLocalSite(domain string) bool {
 	}
 	delete(e.localSites, domain)
 	delete(e.localConfigs, domain)
+	delete(e.localBaseDirs, domain)
 	return true
+}
+
+// RemoveAllLocalSites removes every active local override (`alt halt --all`).
+func (e *Engine) RemoveAllLocalSites() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := len(e.localSites)
+	e.localSites = make(map[string]*router.SiteRouter)
+	e.localConfigs = make(map[string]config.SiteEntry)
+	e.localBaseDirs = make(map[string]string)
+	return n
 }
 
 // ListLocalSites returns the list of active local override domains.
@@ -215,6 +254,45 @@ func (e *Engine) ListLocalSites() []string {
 		out = append(out, d)
 	}
 	return out
+}
+
+// ListLocalSiteDetails returns deep copies of all active local overrides and their route definitions.
+func (e *Engine) ListLocalSiteDetails() []LocalSiteDetail {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]LocalSiteDetail, 0, len(e.localConfigs))
+	for d, cfg := range e.localConfigs {
+		var baseDir string
+		if e.localBaseDirs != nil {
+			baseDir = e.localBaseDirs[d]
+		}
+		out = append(out, LocalSiteDetail{
+			Domain:  d,
+			BaseDir: baseDir,
+			Entry:   cloneSiteEntry(cfg),
+		})
+	}
+	return out
+}
+
+func cloneSiteEntry(in config.SiteEntry) config.SiteEntry {
+	routes := make([]config.RouteEntry, len(in.Routes))
+	for i, r := range in.Routes {
+		rc := config.RouteEntry{
+			Match:    r.Match,
+			Upstream: r.Upstream,
+		}
+		if r.StripPrefix != nil {
+			b := *r.StripPrefix
+			rc.StripPrefix = &b
+		}
+		if r.Static != nil {
+			st := *r.Static
+			rc.Static = &st
+		}
+		routes[i] = rc
+	}
+	return config.SiteEntry{Routes: routes}
 }
 
 // IngestSignedRecords verifies an ownership certificate and target record against the network profile
@@ -276,7 +354,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case records.TargetModeHTTPS:
 		e.serveHTTPSTarget(w, r, host, resolved)
 	case records.TargetModeP2P:
-		writeALTError(w, alterrors.New(alterrors.CodePublisherOffline, "P2P signaling orchestration is not active in this slice"))
+		writeALTError(w, alterrors.New(alterrors.CodePublisherOffline, "P2P WebRTC target resolution is beta/disabled in HTTPS-only release"))
 	default:
 		writeALTError(w, alterrors.New(alterrors.CodeRecordUnavailable, "unsupported target mode"))
 	}
@@ -334,7 +412,7 @@ func (e *Engine) serveHTTPSTarget(w http.ResponseWriter, r *http.Request, altHos
 
 func (e *Engine) defaultSafeOriginTransport() *http.Transport {
 	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
+		Timeout:   6 * time.Second,
 		KeepAlive: 30 * time.Second,
 		Control: func(network, address string, c syscall.RawConn) error {
 			if e.allowLoopbackHTTPS {
@@ -354,6 +432,34 @@ func (e *Engine) defaultSafeOriginTransport() *http.Transport {
 			return nil
 		},
 	}
+	resolvePublicCandidates := func(ctx context.Context, host string) ([]string, error) {
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("no IP addresses resolved for %s", host)
+		}
+		seen := make(map[netip.Addr]struct{}, len(ips))
+		endpoints := make([]string, 0, len(ips))
+		for _, ipAddr := range ips {
+			parsed, ok := netip.AddrFromSlice(ipAddr.IP)
+			if !ok {
+				return nil, fmt.Errorf("invalid resolved IP for %s", host)
+			}
+			parsed = parsed.Unmap()
+			if !e.allowLoopbackHTTPS && IsDisallowedOriginAddr(parsed) {
+				return nil, fmt.Errorf("refusing connection to non-public/special-use IP %s", parsed.String())
+			}
+			if _, dup := seen[parsed]; dup {
+				continue
+			}
+			seen[parsed] = struct{}{}
+			endpoints = append(endpoints, parsed.String())
+		}
+		return endpoints, nil
+	}
+
 	return &http.Transport{
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -369,37 +475,158 @@ func (e *Engine) defaultSafeOriginTransport() *http.Transport {
 			if !e.allowLoopbackHTTPS && IsDisallowedOriginHost(host) {
 				return nil, fmt.Errorf("refusing connection to disallowed host %s", host)
 			}
-			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			candidates, err := resolvePublicCandidates(ctx, host)
 			if err != nil {
 				return nil, err
 			}
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("no IP addresses resolved for %s", host)
+			endpoints := make([]string, len(candidates))
+			for i, ipStr := range candidates {
+				endpoints[i] = net.JoinHostPort(ipStr, port)
 			}
-			var publicAddrs []netip.Addr
-			for _, ipAddr := range ips {
-				parsed, ok := netip.AddrFromSlice(ipAddr.IP)
-				if !ok {
-					return nil, fmt.Errorf("invalid resolved IP for %s", host)
-				}
-				parsed = parsed.Unmap()
-				if !e.allowLoopbackHTTPS && IsDisallowedOriginAddr(parsed) {
-					return nil, fmt.Errorf("refusing connection to non-public/special-use IP %s", parsed.String())
-				}
-				publicAddrs = append(publicAddrs, parsed)
+			// Dial verified global unicast IPs using RFC 8305 Happy Eyeballs (250ms stagger)
+			// so a blackholed CDN/anycast IP fails over in ~250ms instead of blocking for 10s.
+			conn, firstErr := DialStaggeredEndpoints(ctx, endpoints, 250*time.Millisecond, func(dCtx context.Context, ep string) (net.Conn, error) {
+				return dialer.DialContext(dCtx, network, ep)
+			})
+			if firstErr == nil {
+				return conn, nil
 			}
-			// Dial the verified global unicast IP directly to prevent DNS rebinding (ARCHITECTURE.md §8)
-			var lastErr error
-			for _, candidate := range publicAddrs {
-				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.String(), port))
-				if dialErr == nil {
-					return conn, nil
-				}
-				lastErr = dialErr
+			if ctx.Err() != nil {
+				return nil, firstErr
 			}
-			return nil, lastErr
+			// Perform one fresh DNS lookup in case round-robin anycast rotated away from an unreachable VIP
+			retryIPs, rErr := resolvePublicCandidates(ctx, host)
+			if rErr != nil {
+				return nil, firstErr
+			}
+			tried := make(map[string]bool, len(candidates))
+			for _, c := range candidates {
+				tried[c] = true
+			}
+			var freshEndpoints []string
+			for _, ipStr := range retryIPs {
+				if !tried[ipStr] {
+					freshEndpoints = append(freshEndpoints, net.JoinHostPort(ipStr, port))
+				}
+			}
+			if len(freshEndpoints) == 0 {
+				return nil, firstErr
+			}
+			conn2, secondErr := DialStaggeredEndpoints(ctx, freshEndpoints, 250*time.Millisecond, func(dCtx context.Context, ep string) (net.Conn, error) {
+				return dialer.DialContext(dCtx, network, ep)
+			})
+			if secondErr == nil {
+				return conn2, nil
+			}
+			return nil, firstErr
 		},
 	}
+}
+
+// DialStaggeredEndpoints dials `endpoints` using RFC 8305 Happy Eyeballs staggered concurrency:
+// endpoint[0] starts immediately, and each subsequent endpoint starts after `stagger` if no prior
+// attempt has succeeded yet. The first connection to succeed is returned and all remaining in-flight
+// dials are cancelled and closed cleanly.
+func DialStaggeredEndpoints(
+	ctx context.Context,
+	endpoints []string,
+	stagger time.Duration,
+	dialFn func(ctx context.Context, endpoint string) (net.Conn, error),
+) (net.Conn, error) {
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("no dial endpoints provided")
+	}
+	if len(endpoints) == 1 {
+		return dialFn(ctx, endpoints[0])
+	}
+	if stagger <= 0 {
+		stagger = 250 * time.Millisecond
+	}
+
+	dialCtx, cancelAll := context.WithCancel(ctx)
+	defer cancelAll()
+
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	resCh := make(chan dialResult, len(endpoints))
+
+	launch := func(ep string) {
+		go func() {
+			c, err := dialFn(dialCtx, ep)
+			resCh <- dialResult{conn: c, err: err}
+		}()
+	}
+
+	launched := 0
+	completed := 0
+	var lastErr error
+
+	launch(endpoints[0])
+	launched++
+
+	timer := time.NewTimer(stagger)
+	defer timer.Stop()
+
+	for completed < len(endpoints) {
+		if launched == completed && launched < len(endpoints) {
+			// Every launched attempt already failed before the stagger timer fired; launch the next immediately.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			launch(endpoints[launched])
+			launched++
+			if launched < len(endpoints) {
+				timer.Reset(stagger)
+			}
+		}
+
+		select {
+		case res := <-resCh:
+			completed++
+			if res.err == nil && res.conn != nil {
+				cancelAll()
+				// Drain any racing late successes in the background so sockets never leak
+				remaining := launched - completed
+				if remaining > 0 {
+					go func(n int) {
+						for i := 0; i < n; i++ {
+							r := <-resCh
+							if r.conn != nil {
+								_ = r.conn.Close()
+							}
+						}
+					}(remaining)
+				}
+				return res.conn, nil
+			}
+			if res.err != nil {
+				lastErr = res.err
+			}
+			if launched == len(endpoints) && completed == len(endpoints) {
+				return nil, lastErr
+			}
+		case <-timer.C:
+			if launched < len(endpoints) {
+				launch(endpoints[launched])
+				launched++
+				if launched < len(endpoints) {
+					timer.Reset(stagger)
+				}
+			}
+		case <-ctx.Done():
+			cancelAll()
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, ctx.Err()
+		}
+	}
+	return nil, lastErr
 }
 
 // specialUsePrefixes covers IANA IPv4 and IPv6 Special-Purpose Address Registries

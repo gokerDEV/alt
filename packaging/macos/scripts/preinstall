@@ -1,0 +1,19 @@
+#!/bin/sh
+# macOS .pkg preinstall hook for ALT (dev.alt.pkg)
+set -eu
+
+# Verify minimum macOS version (12.0+)
+OS_VER="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo "12.0")"
+OS_MAJOR="${OS_VER%%.*}"
+if [ "${OS_MAJOR:-12}" -lt 12 ] 2>/dev/null; then
+  echo "ALT requires macOS 12.0 or newer (detected ${OS_VER})." >&2
+  exit 1
+fi
+
+# Stop active user LaunchAgent gracefully prior to replacing /usr/local/bin/alt during upgrades
+CONSOLE_UID="$(/usr/bin/stat -f "%u" /dev/console 2>/dev/null || echo "")"
+if [ -n "$CONSOLE_UID" ] && [ "$CONSOLE_UID" != "0" ]; then
+  /bin/launchctl bootout "gui/${CONSOLE_UID}/dev.alt.daemon.alt" >/dev/null 2>&1 || true
+fi
+
+exit 0

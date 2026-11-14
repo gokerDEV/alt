@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"strings"
+	"time"
 
 	"alt/pkg/names"
 )
@@ -62,7 +64,11 @@ func HandleQuery(req []byte, cfg Config) ([]byte, error) {
 		tld = names.DefaultTLD
 	}
 	lowerName := strings.ToLower(strings.TrimSuffix(qName, "."))
-	if !names.Contains(lowerName, tld) {
+	// Per RFC 9462 §4.1, macOS mDNSResponder probes `_dns.resolver.arpa` (SVCB) to discover
+	// Encrypted DNS. Returning NOERROR/NODATA cleanly terminates discovery without retries,
+	// whereas arbitrary non-.alt domains receive REFUSED.
+	isDDRProbe := lowerName == "_dns.resolver.arpa"
+	if !isDDRProbe && !names.Contains(lowerName, tld) {
 		return buildErrorResponse(txID, flags, questionSection, rCodeRefused), nil
 	}
 
@@ -72,7 +78,7 @@ func HandleQuery(req []byte, cfg Config) ([]byte, error) {
 	}
 
 	var answer []byte
-	if qClass == qClassIN {
+	if !isDDRProbe && qClass == qClassIN {
 		switch qType {
 		case qTypeA:
 			if ip4 := cfg.IPv4Loopback.To4(); ip4 != nil {
@@ -191,6 +197,67 @@ func ServeUDP(ctx context.Context, conn net.PacketConn, cfg Config) error {
 			continue
 		}
 		_, _ = conn.WriteTo(resp, addr)
+	}
+}
+
+// ServeTCP runs an RFC 1035 §4.2.2 length-prefixed TCP DNS stub listener so TCP fallback
+// queries from macOS mDNSResponder, Chrome, or `dig +tcp` resolve identically to UDP.
+func ServeTCP(ctx context.Context, ln net.Listener, cfg Config) error {
+	if ln == nil {
+		return errors.New("dnsstub: nil Listener")
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = ln.Close()
+		case <-done:
+		}
+	}()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				continue
+			}
+			return err
+		}
+		go handleTCPConn(conn, cfg)
+	}
+}
+
+func handleTCPConn(conn net.Conn, cfg Config) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	var lenBuf [2]byte
+	for {
+		if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+			return
+		}
+		msgLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+		if msgLen == 0 || msgLen > 4096 {
+			return
+		}
+		req := make([]byte, msgLen)
+		if _, err := io.ReadFull(conn, req); err != nil {
+			return
+		}
+		resp, err := HandleQuery(req, cfg)
+		if err != nil || len(resp) == 0 || len(resp) > 65535 {
+			return
+		}
+		out := make([]byte, 2+len(resp))
+		binary.BigEndian.PutUint16(out[0:2], uint16(len(resp)))
+		copy(out[2:], resp)
+		if _, err := conn.Write(out); err != nil {
+			return
+		}
 	}
 }
 

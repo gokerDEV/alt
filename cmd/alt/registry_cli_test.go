@@ -353,4 +353,3 @@ func TestCLILoginRegisterAccountPublishAndLogoutFlow(t *testing.T) {
 		t.Fatalf("expected server CLI session to be revoked on logout")
 	}
 }
-

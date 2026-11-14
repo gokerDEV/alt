@@ -526,3 +526,21 @@ func verifyTimestamps(issuedAtStr, expiresAtStr string, now time.Time) error {
 	}
 	return nil
 }
+
+// ReferenceValidTime returns a timestamp guaranteed to lie within [issuedAt, expiresAt)
+// when issuedAt < expiresAt, allowing callers restoring persisted monotonic state from disk
+// to re-verify cryptographic signatures even after wall-clock expiry.
+func ReferenceValidTime(issuedAtStr, expiresAtStr string) (time.Time, error) {
+	issuedAt, err := time.Parse(time.RFC3339, issuedAtStr)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("records: invalid issuedAt timestamp: %w", err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("records: invalid expiresAt timestamp: %w", err)
+	}
+	if !expiresAt.After(issuedAt) {
+		return time.Time{}, ErrInvalidValidityWin
+	}
+	return issuedAt, nil
+}

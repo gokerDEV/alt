@@ -738,6 +738,7 @@ func runPublish(args []string) error {
 	flags := flag.NewFlagSet("publish", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	targetURLFlag := flags.String("target", "", "public HTTPS origin URL (e.g. https://my-app.vercel.app)")
+	modeFlag := flags.String("mode", "https", "target transport mode (only 'https' is enabled; 'p2p' is experimental/disabled)")
 	validDaysFlag := flags.Int("valid-days", 365, "target record validity window in days")
 	registryFlag := flags.String("registry", "", "ALT registry base URL")
 	profileFlag := flags.String("profile", "", "network profile YAML path")
@@ -746,8 +747,15 @@ func runPublish(args []string) error {
 		return err
 	}
 
-	if strings.TrimSpace(*targetURLFlag) == "" {
+	if m := strings.ToLower(strings.TrimSpace(*modeFlag)); m != "" && m != "https" {
+		return fmt.Errorf("target mode %q is currently disabled (P2P WebRTC signaling is beta/disabled in this HTTPS-only release; use --mode https --target https://...)", *modeFlag)
+	}
+	trimmedTarget := strings.TrimSpace(*targetURLFlag)
+	if trimmedTarget == "" {
 		return fmt.Errorf("--target <https://...> is required (e.g. alt publish %s --target https://example.org)", rawDomain)
+	}
+	if strings.HasPrefix(strings.ToLower(trimmedTarget), "webrtc:") || strings.HasPrefix(strings.ToLower(trimmedTarget), "p2p:") {
+		return errors.New("P2P WebRTC targets are beta/disabled in this HTTPS-only release; provide an https:// origin URL")
 	}
 	if *validDaysFlag < 1 || *validDaysFlag > 3650 {
 		return fmt.Errorf("--valid-days must be between 1 and 3650")
@@ -853,4 +861,3 @@ func runPublish(args []string) error {
 	}
 	return nil
 }
-

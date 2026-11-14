@@ -1,11 +1,13 @@
 # Binaries and build artifacts
 /bin/
+/dist/
 /alt
 /alt-bootstrap-gen
 /alt-demo-gateway
 *.exe
 *.test
 *.out
+*.pkg
 
 # Private keys & local CA state (NEVER commit private key material)
 *.key

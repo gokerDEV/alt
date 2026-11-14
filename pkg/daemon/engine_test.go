@@ -1,11 +1,13 @@
 package daemon_test
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -601,5 +603,46 @@ func TestEngineRejectsDisagreeingResolverProfile(t *testing.T) {
 	badKeyEng := daemon.NewEngine(ed25519.PublicKey([]byte("short-key")))
 	if !alterrors.IsCode(badKeyEng.InitError(), alterrors.CodeInvalidConfig) {
 		t.Fatalf("expected NewEngine with malformed non-empty key to fail closed with CodeInvalidConfig, got: %v", badKeyEng.InitError())
+	}
+}
+
+func TestDialStaggeredEndpointsHappyEyeballsFailover(t *testing.T) {
+	healthyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen healthy: %v", err)
+	}
+	defer healthyLn.Close()
+	go func() {
+		if c, aErr := healthyLn.Accept(); aErr == nil {
+			_ = c.Close()
+		}
+	}()
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Endpoint 0 simulates a blackholed CDN/anycast VIP (blocks until ctx cancelled),
+	// while Endpoint 1 connects immediately after the 80ms stagger.
+	conn, err := daemon.DialStaggeredEndpoints(
+		ctx,
+		[]string{"blackhole:443", healthyLn.Addr().String()},
+		80*time.Millisecond,
+		func(dCtx context.Context, ep string) (net.Conn, error) {
+			if ep == "blackhole:443" {
+				<-dCtx.Done()
+				return nil, dCtx.Err()
+			}
+			var d net.Dialer
+			return d.DialContext(dCtx, "tcp", ep)
+		},
+	)
+	if err != nil {
+		t.Fatalf("DialStaggeredEndpoints failed: %v", err)
+	}
+	defer conn.Close()
+
+	if elapsed := time.Since(start); elapsed > 800*time.Millisecond {
+		t.Fatalf("expected Happy Eyeballs failover under 800ms, took %s", elapsed)
 	}
 }

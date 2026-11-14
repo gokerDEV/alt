@@ -1,0 +1,20 @@
+#!/bin/sh
+# macOS .pkg postinstall hook for ALT (dev.alt.pkg)
+set -eu
+
+ALT_BIN="/usr/local/bin/alt"
+if [ ! -x "$ALT_BIN" ]; then
+  chmod 0755 "$ALT_BIN"
+fi
+
+# Detect active logged-in desktop user so CA, LaunchAgent, and state belong to the user (never /var/root)
+CONSOLE_USER="$(/usr/bin/stat -f "%Su" /dev/console 2>/dev/null || echo "")"
+CONSOLE_UID="$(/usr/bin/stat -f "%u" /dev/console 2>/dev/null || echo "")"
+
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ] && [ "${CONSOLE_UID:-0}" -gt 0 ] 2>/dev/null; then
+  "$ALT_BIN" setup --user "$CONSOLE_USER" || {
+    echo "Warning: automatic alt setup deferred; run 'sudo alt setup' from Terminal." >&2
+  }
+fi
+
+exit 0

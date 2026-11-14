@@ -47,11 +47,11 @@ reservedNames: [register]
 
 The network ID is included in signed protocol messages. Resolver endpoints provide transport, not authority. The upstream binary defaults to `.alt`, but reusable packages accept an explicit namespace.
 
-## 4. Local HTTPS
+## 4. Local HTTPS, IPC, and macOS Coexistence
 
-The client contains a namespace-scoped DNS stub, device-local constrained CA, SNI certificate issuer, loopback HTTPS proxy, CLI IPC endpoint, local override table, and verified record cache.
+The client contains a namespace-scoped UDP DNS stub, device-local constrained Root CA (`PermittedDNSDomains` critical for `.alt`), SNI leaf certificate issuer, loopback HTTPS proxy, `0600` Unix domain socket IPC endpoint (`pkg/daemon`), persistent override store (`daemon-state.json`), and persistent verified record store (`resolver-state.json`).
 
-The daemon does not run as root. Any production helper for port 443 or resolver configuration is minimal and reversible. Foreground development uses an explicit high port and does not imply OS integration.
+The proxy daemon never runs as `root` and never binds `*:443` or `127.0.0.1:443`. On macOS (`sudo alt setup`), dotALT allocates a dedicated `lo0` alias (`127.0.0.2`), points `/etc/resolver/alt` to `127.0.0.2:15353`, and loads a scoped `pf` redirect rule under `com.apple/alt.alt` (`127.0.0.2:443 -> 127.0.0.2:9443`). Wildcard `*:443` listeners such as Caddy continue serving `localhost` and non-`.alt` domains without conflict. Foreground development (`alt run`) uses an explicit high port and makes zero OS changes.
 
 ## 5. Site configuration
 
@@ -120,23 +120,20 @@ Forks must use their own network ID and keys. Changing only the TLD is insuffici
 
 Implemented and tested:
 
-- strict config parsing;
-- versioned network profile (`pkg/profile`);
-- proxy/static routing and SSRF-guarded HTTPS target dispatch;
-- local CA and leaf certificates;
-- DNS packet responses and optional foreground UDP DNS stub;
-- `networkId`-bound ownership/target signatures and rollback checks;
-- content-addressed IPFS manifest resolver (`pkg/resolver`) and monotonic cache;
-- foreground local run (`alt run`) and `register.alt` demo bootstrap (`examples/demo-bootstrap`);
-- bounded WebRTC DataChannel adapter;
-- configurable namespace primitives.
+- strict `alt.yaml` v1 parsing, segment-aware routing, static/SPA serving, and live `SIGHUP`/IPC reload (`pkg/config`, `pkg/router`, `pkg/daemon`);
+- versioned network profile and monotonic authority-signed trust-root bundle updates (`pkg/profile`, `alt profile show|update`);
+- SSRF-guarded HTTPS target dispatch with origin SNI/Host preservation (`pkg/daemon`);
+- namespace-constrained local ECDSA P-256 Root CA and on-demand SNI leaf certificates (`pkg/pki`);
+- authoritative UDP DNS stub (`pkg/dnsstub`);
+- `networkId`-bound Ed25519 ownership/target signatures and challenge-response owner key binding (`pkg/records`);
+- self-certifying `k51...` IPNS V2 + raw CIDv1 IPFS manifest resolver with atomic, network-isolated persistent anti-rollback state across restarts (`pkg/resolver`);
+- persistent single-instance daemon (`flock`), rotating `0600` logs, Unix socket IPC server/client, and full CLI (`setup`, `uninstall`, `daemon`, `dev`, `list`, `halt`, `status`, `doctor`, `login`, `logout`, `account`, `register`, `publish`, `version`, `completion`);
+- Caddy-safe macOS system installer (`pkg/sysinstall`) + universal `.pkg` builder, Homebrew formula/cask, and release CI (`packaging/`);
+- bounded WebRTC DataChannel `net.Conn`/`net.Listener` transport (`pkg/p2p/dcnet`, beta library layer).
 
-Planned:
+Planned (post-HTTPS-v1):
 
-- production installer/daemon;
-- public registry and identity;
-- IPNS replication;
-- redirect revalidation and multi-origin HTTPS policies;
-- signaling/P2P orchestration;
-- operational release and recovery systems.
+- WebRTC signaling service, NAT traversal/TURN, and live `p2p` target resolution (currently disabled in HTTPS-only release);
+- Linux (`systemd-resolved`) and Windows native system installers;
+- multi-origin failover policies.
 

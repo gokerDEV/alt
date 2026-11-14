@@ -143,6 +143,19 @@ type Config struct {
 	Source               RecordSource
 	FallbackAuthorityKey ed25519.PublicKey
 	Clock                func() time.Time
+	StateStore           *StateStore
+}
+
+// CacheStats reports verified resolver cache and monotonic IPNS state metrics for `alt status` and IPC.
+type CacheStats struct {
+	NetworkID        string `json:"networkId"`
+	CachedDomains    int    `json:"cachedDomains"`
+	StateFilePath    string `json:"stateFilePath,omitempty"`
+	PersistentBacked bool   `json:"persistentBacked"`
+	IPNSRoot         string `json:"ipnsRoot,omitempty"`
+	IPNSSequence     uint64 `json:"ipnsSequence,omitempty"`
+	IPNSHasSequence  bool   `json:"ipnsHasSequence"`
+	IPNSTargetCID    string `json:"ipnsTargetCid,omitempty"`
 }
 
 // Resolver verifies records from a RecordSource against an immutable snapshot of a network Profile
@@ -153,6 +166,7 @@ type Resolver struct {
 	profile     *profile.Profile
 	fallbackKey ed25519.PublicKey
 	source      RecordSource
+	store       *StateStore
 	nowFn       func() time.Time
 	initErr     error
 	sealed      bool
@@ -161,7 +175,8 @@ type Resolver struct {
 	cache map[string]VerifiedResolution
 }
 
-// NewChecked creates a new Resolver and returns CodeInvalidConfig if cfg.Profile fails validation.
+// NewChecked creates a new Resolver and returns CodeInvalidConfig if cfg.Profile fails validation
+// or if any persisted entry in cfg.StateStore fails cryptographic signature verification.
 func NewChecked(cfg Config) (*Resolver, error) {
 	var cloned *profile.Profile
 	if cfg.Profile == nil {
@@ -181,18 +196,31 @@ func NewChecked(cfg Config) (*Resolver, error) {
 	} else if len(cfg.FallbackAuthorityKey) != 0 {
 		return nil, alterrors.New(alterrors.CodeInvalidConfig, "invalid FallbackAuthorityKey length")
 	}
+	if cfg.StateStore != nil && cfg.StateStore.networkID != cloned.NetworkID {
+		return nil, alterrors.New(
+			alterrors.CodeInvalidConfig,
+			fmt.Sprintf("resolver StateStore networkId %q disagrees with profile networkId %q", cfg.StateStore.networkID, cloned.NetworkID),
+		)
+	}
 	clock := cfg.Clock
 	if clock == nil {
 		clock = func() time.Time { return time.Now().UTC() }
 	}
-	return &Resolver{
+	r := &Resolver{
 		initialized: true,
 		profile:     cloned,
 		fallbackKey: fbKey,
 		source:      cfg.Source,
+		store:       cfg.StateStore,
 		nowFn:       clock,
 		cache:       make(map[string]VerifiedResolution),
-	}, nil
+	}
+	if cfg.StateStore != nil {
+		if err := r.restoreFromStore(cfg.StateStore); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
 }
 
 // New creates a new Resolver bound to a validated clone of prof and optional source.
@@ -275,6 +303,83 @@ func (r *Resolver) Profile() *profile.Profile {
 	return r.profile.Clone()
 }
 
+// Stats returns live verified cache and persistent monotonic anti-rollback statistics.
+func (r *Resolver) Stats() CacheStats {
+	if r == nil || r.InitError() != nil {
+		return CacheStats{}
+	}
+	r.mu.RLock()
+	count := len(r.cache)
+	r.mu.RUnlock()
+
+	st := CacheStats{
+		NetworkID:        r.profile.NetworkID,
+		CachedDomains:    count,
+		PersistentBacked: r.store != nil,
+		IPNSRoot:         r.profile.Resolver.IPNSRoot,
+	}
+	if r.store != nil {
+		st.StateFilePath = r.store.Path()
+		if ipns := r.store.SnapshotIPNS(); ipns != nil {
+			st.IPNSRoot = ipns.IPNSRoot
+			st.IPNSSequence = ipns.HighestSequence
+			st.IPNSHasSequence = true
+			st.IPNSTargetCID = ipns.TargetCID
+		}
+	}
+	if ipnsSrc, ok := r.source.(*IPNSSource); ok && ipnsSrc != nil {
+		seq, hasSeq, cid := ipnsSrc.SequenceWatermark()
+		if hasSeq {
+			st.IPNSSequence = seq
+			st.IPNSHasSequence = true
+			st.IPNSTargetCID = cid
+		}
+	}
+	return st
+}
+
+func (r *Resolver) restoreFromStore(store *StateStore) error {
+	for domainKey, entry := range store.SnapshotDomains() {
+		if entry.Ownership == nil || entry.Target == nil {
+			return alterrors.New(alterrors.CodeInvalidConfig, fmt.Sprintf("persisted resolver entry for %q has nil record", domainKey))
+		}
+		normDomain, err := names.NormalizeDomain(domainKey, r.profile.TLD)
+		if err != nil || normDomain != domainKey || entry.Ownership.Domain != domainKey || entry.Target.Domain != domainKey {
+			return alterrors.New(alterrors.CodeInvalidConfig, fmt.Sprintf("persisted resolver entry domain mismatch for %q", domainKey))
+		}
+		if entry.Ownership.Generation != entry.Generation || entry.Target.Sequence != entry.Sequence {
+			return alterrors.New(alterrors.CodeInvalidConfig, fmt.Sprintf("persisted monotonic metadata mismatch for %q", domainKey))
+		}
+		ownRefTime, err := records.ReferenceValidTime(entry.Ownership.IssuedAt, entry.Ownership.ExpiresAt)
+		if err != nil {
+			return alterrors.Wrap(alterrors.CodeInvalidConfig, fmt.Sprintf("invalid persisted ownership timestamps for %q", domainKey), err)
+		}
+		tgtRefTime, err := records.ReferenceValidTime(entry.Target.IssuedAt, entry.Target.ExpiresAt)
+		if err != nil {
+			return alterrors.Wrap(alterrors.CodeInvalidConfig, fmt.Sprintf("invalid persisted target timestamps for %q", domainKey), err)
+		}
+		if err := r.verifyOwnershipAt(entry.Ownership, ownRefTime); err != nil {
+			return alterrors.Wrap(alterrors.CodeInvalidConfig, fmt.Sprintf("persisted ownership signature verification failed for %q", domainKey), err)
+		}
+		if err := entry.Target.Verify(entry.Ownership, tgtRefTime); err != nil {
+			return alterrors.Wrap(alterrors.CodeInvalidConfig, fmt.Sprintf("persisted target signature verification failed for %q", domainKey), err)
+		}
+		r.cache[domainKey] = VerifiedResolution{
+			Ownership: entry.Ownership.Clone(),
+			Target:    entry.Target.Clone(),
+			FromCache: true,
+		}
+	}
+	return nil
+}
+
+func (r *Resolver) verifyOwnershipAt(cert *records.OwnershipCertificate, refTime time.Time) error {
+	if _, ok := r.profile.AuthorityKey(cert.IssuerKeyID); ok || len(r.fallbackKey) == 0 {
+		return cert.VerifyForProfile(r.profile, refTime)
+	}
+	return cert.VerifyForNetwork(r.fallbackKey, refTime, r.profile.NetworkID, r.profile.TLD)
+}
+
 // Ingest verifies and stores an ownership certificate and target record using the resolver's clock.
 func (r *Resolver) Ingest(cert *records.OwnershipCertificate, target *records.TargetRecord) error {
 	if err := r.InitError(); err != nil {
@@ -292,7 +397,7 @@ func (r *Resolver) IngestAt(cert *records.OwnershipCertificate, target *records.
 	if err := r.verifyPair(cert, target, now); err != nil {
 		return err
 	}
-	return r.commitMonotonic(cert, target)
+	return r.commitMonotonic(cert, target, now)
 }
 
 // Resolve resolves a domain through the verified cache and RecordSource fallback.
@@ -343,7 +448,7 @@ func (r *Resolver) Resolve(ctx context.Context, domainInput string) (*VerifiedRe
 	if err := r.verifyPair(cert, target, now); err != nil {
 		return nil, err
 	}
-	if err := r.commitMonotonic(cert, target); err != nil {
+	if err := r.commitMonotonic(cert, target, now); err != nil {
 		return nil, err
 	}
 
@@ -391,7 +496,7 @@ func (r *Resolver) verifyPair(cert *records.OwnershipCertificate, target *record
 	return nil
 }
 
-func (r *Resolver) commitMonotonic(cert *records.OwnershipCertificate, target *records.TargetRecord) error {
+func (r *Resolver) commitMonotonic(cert *records.OwnershipCertificate, target *records.TargetRecord, now time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -401,6 +506,12 @@ func (r *Resolver) commitMonotonic(cert *records.OwnershipCertificate, target *r
 		}
 		if cert.Generation == prev.Ownership.Generation && target.Sequence < prev.Target.Sequence {
 			return alterrors.New(alterrors.CodeRecordUnavailable, "target sequence rollback rejected")
+		}
+	}
+
+	if r.store != nil {
+		if err := r.store.SaveDomain(cert, target, now); err != nil {
+			return err
 		}
 	}
 

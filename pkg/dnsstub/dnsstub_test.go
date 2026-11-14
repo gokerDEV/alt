@@ -2,9 +2,12 @@ package dnsstub_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"io"
 	"net"
 	"testing"
+	"time"
 
 	"alt/pkg/dnsstub"
 )
@@ -49,5 +52,62 @@ func TestHandleQueryAltAndNonAlt(t *testing.T) {
 	rcode := respCom[3] & 0x0F
 	if rcode != 5 {
 		t.Fatalf("expected RCODE=5 (REFUSED) for non-.alt domain, got %d", rcode)
+	}
+
+	// 4. RFC 9462 DDR `_dns.resolver.arpa` SVCB (64) returns NOERROR/NODATA so mDNSResponder stops probing cleanly
+	qDDR := dnsstub.EncodeQuery(0x1237, "_dns.resolver.arpa", 64)
+	respDDR, err := dnsstub.HandleQuery(qDDR, cfg)
+	if err != nil {
+		t.Fatalf("HandleQuery _dns.resolver.arpa failed: %v", err)
+	}
+	if gotRcode := respDDR[3] & 0x0F; gotRcode != 0 {
+		t.Fatalf("expected RCODE=0 (NOERROR) for _dns.resolver.arpa, got %d", gotRcode)
+	}
+	if binary.BigEndian.Uint16(respDDR[6:8]) != 0 {
+		t.Fatalf("expected 0 answers for _dns.resolver.arpa")
+	}
+}
+
+func TestServeTCP(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen tcp: %v", err)
+	}
+	defer ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = dnsstub.ServeTCP(ctx, ln, dnsstub.Config{
+			IPv4Loopback: net.ParseIP("127.0.0.2"),
+			TTL:          60,
+			TLD:          "alt",
+		})
+	}()
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial tcp: %v", err)
+	}
+	defer conn.Close()
+
+	q := dnsstub.EncodeQuery(0x4242, "goker.alt", 1)
+	frame := make([]byte, 2+len(q))
+	binary.BigEndian.PutUint16(frame[0:2], uint16(len(q)))
+	copy(frame[2:], q)
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("Write tcp query: %v", err)
+	}
+
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		t.Fatalf("ReadFull length: %v", err)
+	}
+	resp := make([]byte, binary.BigEndian.Uint16(lenBuf[:]))
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		t.Fatalf("ReadFull body: %v", err)
+	}
+	if got := resp[len(resp)-4:]; !bytes.Equal(got, []byte{127, 0, 0, 2}) {
+		t.Fatalf("expected 127.0.0.2 over TCP DNS, got %v", got)
 	}
 }

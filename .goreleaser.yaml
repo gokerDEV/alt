@@ -1,0 +1,60 @@
+version: 2
+
+project_name: alt
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: alt
+    main: ./cmd/alt
+    binary: alt
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Commit={{.ShortCommit}}
+      - -X main.BuildDate={{.Date}}
+
+universal_binaries:
+  - id: alt-darwin-universal
+    ids:
+      - alt
+    replace: false
+    name_template: alt
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - LICENSE
+      - LICENSE-DOCS-CC-BY-4.0
+      - NOTICE
+      - README.md
+      - ARCHITECTURE.md
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+
+release:
+  prerelease: auto

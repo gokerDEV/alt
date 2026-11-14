@@ -404,21 +404,22 @@ func skipCBORItem(buf []byte, pos int, depth int) (int, error) {
 
 // IPNSOptions configures IPNSSource for trustless IPNS + raw CIDv1 manifest resolution.
 type IPNSOptions struct {
-	IPNSRoot            string
-	BootstrapCID        string // Optional fixed bootstrap CID fallback (e.g., for register.alt)
-	ExpectedNetwork     string
-	Gateways            []string
-	Timeout             time.Duration
-	MaxBytes            int64
-	CacheTTL            time.Duration
-	Clock               func() time.Time
-	HTTPClient          *http.Client
+	IPNSRoot        string
+	BootstrapCID    string // Optional fixed bootstrap CID fallback (e.g., for register.alt)
+	ExpectedNetwork string
+	Gateways        []string
+	Timeout         time.Duration
+	MaxBytes        int64
+	CacheTTL        time.Duration
+	Clock           func() time.Time
+	HTTPClient      *http.Client
+	StateStore      *StateStore
 }
 
 // IPNSSource resolves an authenticated IPNS root (`k51...`) via Trustless IPFS HTTP Gateways:
 //  1. Fetches `/ipns/<ipnsRoot>?format=ipns-record` (`application/vnd.ipfs.ipns-record`),
 //  2. Verifies the Ed25519 V2 signature against the self-certifying `k51...` public key,
-//  3. Enforces monotonic IPNS `Sequence` anti-rollback and EOL expiration,
+//  3. Enforces monotonic IPNS `Sequence` anti-rollback (persisted across restarts when StateStore is set) and EOL expiration,
 //  4. Fetches `/ipfs/<resolvedCid>?format=raw` and verifies `VerifyBlockCID` BEFORE JSON decoding,
 //  5. Optionally falls back to a pinned `BootstrapCID` when IPNS is unreachable or does not contain a bootstrap record.
 type IPNSSource struct {
@@ -430,6 +431,7 @@ type IPNSSource struct {
 	maxBytes        int64
 	cacheTTL        time.Duration
 	nowFn           func() time.Time
+	store           *StateStore
 
 	mu             sync.Mutex
 	highestSeq     uint64
@@ -437,6 +439,7 @@ type IPNSSource struct {
 	cachedCID      string
 	cachedManifest []byte
 	cacheExpiresAt time.Time
+	ipnsExpiresAt  time.Time
 }
 
 // NewIPNSSource creates a verifiable IPNS RecordSource backed by one or more Trustless IPFS Gateways.
@@ -503,7 +506,7 @@ func NewIPNSSource(opts IPNSOptions) (*IPNSSource, error) {
 		}
 	}
 
-	return &IPNSSource{
+	src := &IPNSSource{
 		ipnsRoot:        root,
 		bootstrapSource: bootstrapSrc,
 		expectedNetwork: opts.ExpectedNetwork,
@@ -512,7 +515,38 @@ func NewIPNSSource(opts IPNSOptions) (*IPNSSource, error) {
 		maxBytes:        maxBytes,
 		cacheTTL:        cacheTTL,
 		nowFn:           clock,
-	}, nil
+		store:           opts.StateStore,
+	}
+
+	if opts.StateStore != nil {
+		if persisted := opts.StateStore.SnapshotIPNS(); persisted != nil && persisted.IPNSRoot == root {
+			src.hasSeenSeq = true
+			src.highestSeq = persisted.HighestSequence
+			src.cachedCID = persisted.TargetCID
+			if eol, err := time.Parse(time.RFC3339Nano, persisted.ExpiresAt); err == nil {
+				src.ipnsExpiresAt = eol
+			}
+			if len(persisted.RawManifest) > 0 && VerifyBlockCID(persisted.TargetCID, persisted.RawManifest) == nil {
+				if m, err := DecodeManifestStrict(persisted.RawManifest); err == nil {
+					if opts.ExpectedNetwork == "" || m.NetworkID == opts.ExpectedNetwork {
+						src.cachedManifest = append([]byte(nil), persisted.RawManifest...)
+					}
+				}
+			}
+		}
+	}
+
+	return src, nil
+}
+
+// SequenceWatermark reports the highest verified IPNS sequence number seen by this source.
+func (s *IPNSSource) SequenceWatermark() (sequence uint64, hasSequence bool, targetCID string) {
+	if s == nil {
+		return 0, false, ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.highestSeq, s.hasSeenSeq, s.cachedCID
 }
 
 // Resolve resolves `domain` from the latest Ed25519-verified IPNS manifest snapshot,
@@ -589,7 +623,9 @@ func (s *IPNSSource) fetchVerifiedManifest(ctx context.Context) ([]byte, string,
 	// Fast path: if the verified IPNS sequence points to the exact CID we already verified in memory, reuse bytes!
 	if bestRec.TargetCID == prevCID && len(prevManifest) > 0 {
 		if err := VerifyBlockCID(bestRec.TargetCID, prevManifest); err == nil {
-			s.commitManifestCache(bestRec, prevManifest, now)
+			if err := s.commitManifestCache(bestRec, prevManifest, now); err != nil {
+				return nil, "", err
+			}
 			return prevManifest, bestRec.TargetCID, nil
 		}
 	}
@@ -628,7 +664,10 @@ func (s *IPNSSource) fetchVerifiedManifest(ctx context.Context) ([]byte, string,
 			continue
 		}
 
-		s.commitManifestCache(bestRec, rawBlock, now)
+		if err := s.commitManifestCache(bestRec, rawBlock, now); err != nil {
+			blockErr = err
+			continue
+		}
 		return rawBlock, bestRec.TargetCID, nil
 	}
 
@@ -638,11 +677,16 @@ func (s *IPNSSource) fetchVerifiedManifest(ctx context.Context) ([]byte, string,
 	return nil, "", alterrors.Wrap(alterrors.CodeRecordUnavailable, "failed to fetch raw manifest block referenced by IPNS", blockErr)
 }
 
-func (s *IPNSSource) commitManifestCache(rec *VerifiedIPNSRecord, raw []byte, now time.Time) {
+func (s *IPNSSource) commitManifestCache(rec *VerifiedIPNSRecord, raw []byte, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.hasSeenSeq && rec.Sequence < s.highestSeq {
-		return
+		return alterrors.New(alterrors.CodeRecordUnavailable, "IPNS sequence rollback rejected")
+	}
+	if s.store != nil {
+		if err := s.store.SaveIPNS(s.ipnsRoot, rec, raw, now); err != nil {
+			return err
+		}
 	}
 	ttl := s.cacheTTL
 	if rec.TTL > 0 && rec.TTL < ttl {
@@ -657,6 +701,8 @@ func (s *IPNSSource) commitManifestCache(rec *VerifiedIPNSRecord, raw []byte, no
 	s.cachedCID = rec.TargetCID
 	s.cachedManifest = append([]byte(nil), raw...)
 	s.cacheExpiresAt = exp
+	s.ipnsExpiresAt = rec.ExpiresAt
+	return nil
 }
 
 func (s *IPNSSource) fetchIPNSRecordBytes(ctx context.Context, gatewayBase string) ([]byte, error) {
@@ -738,4 +784,3 @@ func fetchGatewayRawBlock(ctx context.Context, client *http.Client, gatewayBase,
 	}
 	return data, nil
 }
-

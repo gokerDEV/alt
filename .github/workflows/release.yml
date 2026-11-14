@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.2.0)"
+        required: false
+        default: "0.2.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-pkg:
+    name: Build, Sign & Notarize macOS Universal .pkg
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run verification gate
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -count=1 -race ./...
+
+      - name: Import Apple Developer certificates (optional if secrets configured)
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          if [ -n "$MACOS_CERT_P12" ]; then
+            KEYCHAIN_PATH="$RUNNER_TEMP/alt-release.keychain-db"
+            KEYCHAIN_PASS="$(uuidgen)"
+            echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/certs.p12"
+            security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            security import "$RUNNER_TEMP/certs.p12" -P "$MACOS_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+            security set-key-partition-list -S apple-tool:,apple:,codesign:,productsign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            rm -f "$RUNNER_TEMP/certs.p12"
+          fi
+
+      - name: Build macOS universal .pkg and archive
+        env:
+          VERSION: ${{ github.ref_name != 'main' && github.ref_name || inputs.version }}
+          APPLE_DEVELOPER_ID_APP: ${{ secrets.APPLE_DEVELOPER_ID_APP }}
+          APPLE_DEVELOPER_ID_INSTALLER: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          sh ./packaging/macos/build-pkg.sh
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: dist/*
+
+  build-linux:
+    name: Build Linux Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Linux amd64 & arm64 archives
+        env:
+          RAW_VER: ${{ github.ref_name != 'main' && github.ref_name || inputs.version }}
+        run: |
+          VER="${RAW_VER#v}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          LDFLAGS="-s -w -X main.Version=${VER} -X main.Commit=${COMMIT} -X main.BuildDate=${DATE}"
+          mkdir -p dist
+          for ARCH in amd64 arm64; do
+            STAGE="$(mktemp -d)"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags "$LDFLAGS" -o "$STAGE/alt" ./cmd/alt
+            cp LICENSE README.md "$STAGE/"
+            tar -C "$STAGE" -czf "dist/alt-${VER}-linux-${ARCH}.tar.gz" alt LICENSE README.md
+            rm -rf "$STAGE"
+          done
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: dist/*
+
+  publish-release:
+    name: Publish GitHub Release & Checksums
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos-pkg, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-Input
+
+      - name: Consolidate artifacts and compute SHA256SUMS
+        run: |
+          mkdir -p release-out
+          find release-Input -type f ! -name "SHA256SUMS" -exec cp {} release-out/ \;
+          cd release-out
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-out/*

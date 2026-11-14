@@ -189,9 +189,9 @@ func TestOwnershipAndTargetVerification(t *testing.T) {
 	// Cross-language golden fixture check when invoked from alt-registry TypeScript test suite
 	if rawGolden := os.Getenv("ALT_TS_GOLDEN_FIXTURE"); rawGolden != "" {
 		var golden struct {
-			AuthorityPub     string                      `json:"authorityPub"`
-			ChallengePayload records.KeyChallengePayload `json:"challengePayload"`
-			ChallengeSig     string                      `json:"challengeSig"`
+			AuthorityPub     string                       `json:"authorityPub"`
+			ChallengePayload records.KeyChallengePayload  `json:"challengePayload"`
+			ChallengeSig     string                       `json:"challengeSig"`
 			Cert             records.OwnershipCertificate `json:"cert"`
 			Target           records.TargetRecord         `json:"target"`
 		}
